@@ -1,0 +1,64 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unsigned-ipa:
+    name: Build unsigned IPA
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode environment
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Build app for iPhoneOS without code signing
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project ConfluenceHot.xcodeproj \
+            -scheme ConfluenceHot \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            clean build
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          PRODUCT_DIR="build/DerivedData/Build/Products/Release-iphoneos"
+          APP_PATH="${PRODUCT_DIR}/ConfluenceHot.app"
+          test -d "${APP_PATH}"
+
+          rm -rf build/Payload
+          mkdir -p build/Payload
+          cp -R "${APP_PATH}" build/Payload/
+
+          (cd build && zip -qry ConfluenceHot-unsigned.ipa Payload)
+          shasum -a 256 build/ConfluenceHot-unsigned.ipa > build/ConfluenceHot-unsigned.ipa.sha256
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ConfluenceHot-unsigned-ipa
+          path: |
+            build/ConfluenceHot-unsigned.ipa
+            build/ConfluenceHot-unsigned.ipa.sha256
+          if-no-files-found: error
+          retention-days: 14
