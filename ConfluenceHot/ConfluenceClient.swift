@@ -90,13 +90,54 @@ final class ConfluenceClient {
         )
     }
 
-    private func request<T: Decodable>(_ path: String, queryItems: [URLQueryItem] = []) async throws -> T {
+    func fetchComments(contentID: String, limit: Int = 50) async throws -> [CommentItem] {
+        let response: CommentResponse = try await request(
+            "/rest/api/content/\(contentID)/child/comment",
+            queryItems: [
+                URLQueryItem(name: "limit", value: String(limit)),
+                URLQueryItem(name: "expand", value: "body.view,history.createdBy,version")
+            ]
+        )
+        return response.results.map { $0.item() }
+    }
+
+    func postComment(contentID: String, containerType: String, text: String) async throws -> CommentItem {
+        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else {
+            throw ConfluenceClientError.emptyComment
+        }
+
+        let requestBody = CreateCommentRequest(
+            type: "comment",
+            container: ContentContainer(id: contentID, type: containerType.lowercased().contains("blog") ? "blogpost" : "page"),
+            body: StorageBody(storage: StorageRepresentation(value: Self.storageHTML(from: cleaned), representation: "storage"))
+        )
+
+        let result: CommentResult = try await request(
+            "/rest/api/content",
+            method: "POST",
+            queryItems: [URLQueryItem(name: "expand", value: "body.view,history.createdBy,version")],
+            body: requestBody
+        )
+        return result.item()
+    }
+
+    private func request<T: Decodable, Body: Encodable>(
+        _ path: String,
+        method: String = "GET",
+        queryItems: [URLQueryItem] = [],
+        body: Body? = nil
+    ) async throws -> T {
         let url = try makeURL(path: path, queryItems: queryItems)
         var request = URLRequest(url: url)
-        request.httpMethod = "GET"
+        request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("ConfluenceHot-iOS", forHTTPHeaderField: "User-Agent")
         request.setValue(basicAuthHeader(), forHTTPHeaderField: "Authorization")
+        if let body {
+            request.httpBody = try JSONEncoder().encode(body)
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
 
         let (data, response) = try await session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -116,6 +157,10 @@ final class ConfluenceClient {
             let message = String(data: data, encoding: .utf8)
             throw ConfluenceClientError.httpStatus(httpResponse.statusCode, message)
         }
+    }
+
+    private func request<T: Decodable>(_ path: String, queryItems: [URLQueryItem] = []) async throws -> T {
+        try await request(path, method: "GET", queryItems: queryItems, body: Optional<EmptyBody>.none)
     }
 
     private func makeURL(path: String, queryItems: [URLQueryItem]) throws -> URL {
@@ -145,6 +190,44 @@ final class ConfluenceClient {
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
     }
+
+    private static func storageHTML(from text: String) -> String {
+        let escaped = text
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+
+        let paragraphs = escaped
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .map { "<p>\($0)</p>" }
+
+        return paragraphs.isEmpty ? "<p></p>" : paragraphs.joined()
+    }
+}
+
+private struct EmptyBody: Encodable {}
+
+private struct CreateCommentRequest: Encodable {
+    let type: String
+    let container: ContentContainer
+    let body: StorageBody
+}
+
+private struct ContentContainer: Encodable {
+    let id: String
+    let type: String
+}
+
+private struct StorageBody: Encodable {
+    let storage: StorageRepresentation
+}
+
+private struct StorageRepresentation: Encodable {
+    let value: String
+    let representation: String
 }
 
 enum ConfluenceClientError: LocalizedError, Equatable {
@@ -156,6 +239,7 @@ enum ConfluenceClientError: LocalizedError, Equatable {
     case httpStatus(Int, String?)
     case decoding(String)
     case keychain(String)
+    case emptyComment
 
     var errorDescription: String? {
         switch self {
@@ -175,6 +259,8 @@ enum ConfluenceClientError: LocalizedError, Equatable {
             return "响应格式无法解析"
         case .keychain(let message):
             return message
+        case .emptyComment:
+            return "请输入回复内容"
         }
     }
 }

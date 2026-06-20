@@ -1,5 +1,10 @@
 import Foundation
 
+private enum SessionDefaultsKeys {
+    static let baseURL = "server.baseURL"
+    static let username = "server.username"
+}
+
 @MainActor
 final class SessionStore: ObservableObject {
     @Published private(set) var configuration: ServerConfiguration?
@@ -9,8 +14,6 @@ final class SessionStore: ObservableObject {
     @Published var errorMessage: String?
 
     private let defaults = UserDefaults.standard
-    private let baseURLKey = "server.baseURL"
-    private let usernameKey = "server.username"
 
     var isSignedIn: Bool {
         client != nil && user != nil
@@ -68,8 +71,8 @@ final class SessionStore: ObservableObject {
             try? KeychainStore.deletePassword(account: configuration.keychainAccount)
         }
 
-        defaults.removeObject(forKey: baseURLKey)
-        defaults.removeObject(forKey: usernameKey)
+        defaults.removeObject(forKey: SessionDefaultsKeys.baseURL)
+        defaults.removeObject(forKey: SessionDefaultsKeys.username)
         configuration = nil
         user = nil
         client = nil
@@ -85,8 +88,8 @@ final class SessionStore: ObservableObject {
         do {
             let user = try await client.validateSession()
             if persist {
-                defaults.set(configuration.baseURL.absoluteString, forKey: baseURLKey)
-                defaults.set(configuration.username, forKey: usernameKey)
+                defaults.set(configuration.baseURL.absoluteString, forKey: SessionDefaultsKeys.baseURL)
+                defaults.set(configuration.username, forKey: SessionDefaultsKeys.username)
                 try KeychainStore.savePassword(password, account: configuration.keychainAccount)
             }
 
@@ -103,8 +106,12 @@ final class SessionStore: ObservableObject {
     }
 
     private func loadConfiguration() -> ServerConfiguration? {
-        guard let baseURL = defaults.string(forKey: baseURLKey),
-              let username = defaults.string(forKey: usernameKey) else {
+        Self.loadStoredConfiguration(defaults: defaults)
+    }
+
+    nonisolated static func loadStoredConfiguration(defaults: UserDefaults = .standard) -> ServerConfiguration? {
+        guard let baseURL = defaults.string(forKey: SessionDefaultsKeys.baseURL),
+              let username = defaults.string(forKey: SessionDefaultsKeys.username) else {
             return nil
         }
         return try? ServerConfiguration.normalized(baseURL: baseURL, username: username)

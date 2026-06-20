@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RootView: View {
     @EnvironmentObject private var sessionStore: SessionStore
+    @EnvironmentObject private var appSettings: AppSettings
 
     var body: some View {
         Group {
@@ -14,12 +15,13 @@ struct RootView: View {
                 LoginView()
             }
         }
-        .preferredColorScheme(.light)
+        .preferredColorScheme(appSettings.preferredColorScheme)
     }
 }
 
 struct LoginView: View {
     @EnvironmentObject private var sessionStore: SessionStore
+    @EnvironmentObject private var appSettings: AppSettings
     @State private var baseURL = ""
     @State private var username = ""
     @State private var password = ""
@@ -33,10 +35,10 @@ struct LoginView: View {
                             .font(.system(size: 36, weight: .semibold))
                             .foregroundStyle(AtlassianTheme.blue)
                         Text("Confluence")
-                            .font(.largeTitle.weight(.bold))
+                            .font(appSettings.fontChoice == .system ? .largeTitle.weight(.bold) : appSettings.fontChoice.font(size: 34 * appSettings.fontScale, relativeTo: .largeTitle))
                             .foregroundStyle(AtlassianTheme.text)
                         Text("连接 Server 或 Data Center 站点")
-                            .font(.subheadline)
+                            .font(appSettings.subheadlineFont)
                             .foregroundStyle(AtlassianTheme.mutedText)
                     }
 
@@ -92,16 +94,12 @@ struct LoginView: View {
 struct MainTabView: View {
     var body: some View {
         TabView {
-            NavigationStack {
-                ContentFeedView(kind: .recent)
-            }
+            AdaptiveFeedView(kind: .recent)
             .tabItem {
                 Label("最新", systemImage: "clock")
             }
 
-            NavigationStack {
-                ContentFeedView(kind: .popular)
-            }
+            AdaptiveFeedView(kind: .popular)
             .tabItem {
                 Label("热门", systemImage: "flame.fill")
             }

@@ -8,7 +8,9 @@
 - 使用 Basic Auth 访问 Confluence REST API，密码保存在 iOS Keychain。
 - “热门”优先读取 `/rest/popular/1/stream/content`，站点未启用该插件时降级到 CQL 最近活动内容。
 - “最新”使用 `/rest/api/content/search` 和 CQL 拉取页面、博客。
-- 支持搜索、详情渲染，以及跳转到 Confluence Web 页面。
+- 支持搜索、详情渲染、评论列表、添加回复，以及跳转到 Confluence Web 页面。
+- 支持夜间模式、字号调整、霞鹜文楷字体、横屏分栏阅读。
+- 支持本地热门提醒：每天或每周在系统允许的后台刷新窗口中检查新的热门内容。
 
 ## 验证过的接口
 
@@ -17,14 +19,22 @@
 - `GET /rest/api/user/current`
 - `GET /rest/api/content/search`
 - `GET /rest/popular/1/stream/content`
+- `GET /rest/api/content/{id}/child/comment`
 
 密码没有写入仓库。请在 App 登录页手动输入测试账号。
+
+热门提醒使用 iOS Background App Refresh 和本地通知，执行时间由系统调度，不保证严格准点。未配置 Apple Push Notification 服务，因此不是服务器实时推送。
 
 ## 构建
 
 用 Xcode 打开 `ConfluenceHot.xcodeproj`，选择 `ConfluenceHot` scheme 后运行到 iPhone 模拟器或真机。
 
 当前机器只有 Command Line Tools，没有完整 Xcode，因此这里无法执行 `xcodebuild` 的 iOS 构建。
+
+## 打包资源
+
+- App Icon 使用 Atlassian 在 App Store 发布的 Confluence Data Center 官方图标资源生成。
+- 中文字体打包 `LXGW WenKai / 霞鹜文楷`，文件位于 `ConfluenceHot/Resources/Fonts/LXGWWenKai-Regular.ttf`。
 
 ## 本地真机验证
 

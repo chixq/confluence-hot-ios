@@ -18,6 +18,9 @@
 		100000000000000000000109 /* DetailViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000009 /* DetailViews.swift */; };
 		100000000000000000000110 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000010 /* SettingsView.swift */; };
 		100000000000000000000111 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000011 /* Assets.xcassets */; };
+		100000000000000000000112 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000014 /* AppSettings.swift */; };
+		100000000000000000000113 /* PopularNotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000015 /* PopularNotificationManager.swift */; };
+		100000000000000000000114 /* LXGWWenKai-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000016 /* LXGWWenKai-Regular.ttf */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -34,6 +37,9 @@
 		100000000000000000000011 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		100000000000000000000012 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		100000000000000000000013 /* ConfluenceHot.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ConfluenceHot.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		100000000000000000000014 /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
+		100000000000000000000015 /* PopularNotificationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PopularNotificationManager.swift; sourceTree = "<group>"; };
+		100000000000000000000016 /* LXGWWenKai-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = Resources/Fonts/LXGWWenKai-Regular.ttf; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -59,16 +65,19 @@
 			isa = PBXGroup;
 			children = (
 				100000000000000000000001 /* ConfluenceHotApp.swift */,
+				100000000000000000000014 /* AppSettings.swift */,
 				100000000000000000000002 /* DesignSystem.swift */,
 				100000000000000000000003 /* Models.swift */,
 				100000000000000000000004 /* ConfluenceClient.swift */,
 				100000000000000000000005 /* KeychainStore.swift */,
+				100000000000000000000015 /* PopularNotificationManager.swift */,
 				100000000000000000000006 /* SessionStore.swift */,
 				100000000000000000000007 /* RootViews.swift */,
 				100000000000000000000008 /* ListViews.swift */,
 				100000000000000000000009 /* DetailViews.swift */,
 				100000000000000000000010 /* SettingsView.swift */,
 				100000000000000000000011 /* Assets.xcassets */,
+				100000000000000000000016 /* LXGWWenKai-Regular.ttf */,
 				100000000000000000000012 /* Info.plist */,
 			);
 			path = ConfluenceHot;
@@ -141,6 +150,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				100000000000000000000111 /* Assets.xcassets in Resources */,
+				100000000000000000000114 /* LXGWWenKai-Regular.ttf in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -153,9 +163,11 @@
 			files = (
 				100000000000000000000101 /* ConfluenceHotApp.swift in Sources */,
 				100000000000000000000102 /* DesignSystem.swift in Sources */,
+				100000000000000000000112 /* AppSettings.swift in Sources */,
 				100000000000000000000103 /* Models.swift in Sources */,
 				100000000000000000000104 /* ConfluenceClient.swift in Sources */,
 				100000000000000000000105 /* KeychainStore.swift in Sources */,
+				100000000000000000000113 /* PopularNotificationManager.swift in Sources */,
 				100000000000000000000106 /* SessionStore.swift in Sources */,
 				100000000000000000000107 /* RootViews.swift in Sources */,
 				100000000000000000000108 /* ListViews.swift in Sources */,
@@ -289,7 +301,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = NO;
@@ -299,7 +311,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.1;
+				MARKETING_VERSION = 1.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.chixiaoqiang.confluencehot;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -317,7 +329,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = NO;
@@ -327,7 +339,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.1;
+				MARKETING_VERSION = 1.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.chixiaoqiang.confluencehot;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";

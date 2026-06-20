@@ -3,11 +3,12 @@ import SwiftUI
 enum AtlassianTheme {
     static let blue = Color(hex: 0x0052CC)
     static let bluePressed = Color(hex: 0x0747A6)
-    static let background = Color(hex: 0xF4F5F7)
-    static let surface = Color.white
-    static let text = Color(hex: 0x172B4D)
-    static let mutedText = Color(hex: 0x6B778C)
-    static let border = Color(hex: 0xDFE1E6)
+    static let background = Color.dynamic(light: 0xF4F5F7, dark: 0x0F1117)
+    static let surface = Color.dynamic(light: 0xFFFFFF, dark: 0x1B1F29)
+    static let secondarySurface = Color.dynamic(light: 0xFAFBFC, dark: 0x242936)
+    static let text = Color.dynamic(light: 0x172B4D, dark: 0xF4F5F7)
+    static let mutedText = Color.dynamic(light: 0x6B778C, dark: 0xA5ADBA)
+    static let border = Color.dynamic(light: 0xDFE1E6, dark: 0x303849)
     static let green = Color(hex: 0x36B37E)
     static let yellow = Color(hex: 0xFFAB00)
     static let red = Color(hex: 0xDE350B)
@@ -23,7 +24,30 @@ extension Color {
             opacity: alpha
         )
     }
+
+    static func dynamic(light: UInt, dark: UInt) -> Color {
+        #if os(iOS)
+        return Color(UIColor { traits in
+            traits.userInterfaceStyle == .dark ? UIColor(hex: dark) : UIColor(hex: light)
+        })
+        #else
+        return Color(hex: light)
+        #endif
+    }
 }
+
+#if os(iOS)
+extension UIColor {
+    convenience init(hex: UInt, alpha: CGFloat = 1) {
+        self.init(
+            red: CGFloat((hex >> 16) & 0xFF) / 255,
+            green: CGFloat((hex >> 8) & 0xFF) / 255,
+            blue: CGFloat(hex & 0xFF) / 255,
+            alpha: alpha
+        )
+    }
+}
+#endif
 
 struct PrimaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
@@ -54,17 +78,19 @@ struct SecondaryButtonStyle: ButtonStyle {
 }
 
 struct SectionHeader: View {
+    @EnvironmentObject private var appSettings: AppSettings
+
     let title: String
     let subtitle: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
-                .font(.largeTitle.weight(.bold))
+                .font(appSettings.fontChoice == .system ? .largeTitle.weight(.bold) : appSettings.fontChoice.font(size: 34 * appSettings.fontScale, relativeTo: .largeTitle))
                 .foregroundStyle(AtlassianTheme.text)
             if let subtitle, !subtitle.isEmpty {
                 Text(subtitle)
-                    .font(.subheadline)
+                    .font(appSettings.subheadlineFont)
                     .foregroundStyle(AtlassianTheme.mutedText)
             }
         }
@@ -76,6 +102,8 @@ struct SectionHeader: View {
 }
 
 struct EmptyStateView: View {
+    @EnvironmentObject private var appSettings: AppSettings
+
     let icon: String
     let title: String
     let message: String
@@ -86,10 +114,10 @@ struct EmptyStateView: View {
                 .font(.system(size: 36, weight: .semibold))
                 .foregroundStyle(AtlassianTheme.mutedText)
             Text(title)
-                .font(.headline)
+                .font(appSettings.headlineFont)
                 .foregroundStyle(AtlassianTheme.text)
             Text(message)
-                .font(.subheadline)
+                .font(appSettings.subheadlineFont)
                 .foregroundStyle(AtlassianTheme.mutedText)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 280)

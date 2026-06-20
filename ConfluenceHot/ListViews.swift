@@ -32,63 +32,23 @@ enum FeedKind {
     }
 }
 
-struct ContentFeedView: View {
-    @EnvironmentObject private var sessionStore: SessionStore
+@MainActor
+final class ContentFeedViewModel: ObservableObject {
     let kind: FeedKind
 
-    @State private var items: [ContentItem] = []
-    @State private var isLoading = false
-    @State private var errorMessage: String?
+    @Published private(set) var items: [ContentItem] = []
+    @Published private(set) var isLoading = false
+    @Published var errorMessage: String?
+    @Published var lastLoadedAt: Date?
 
-    var body: some View {
-        ScrollView {
-            SectionHeader(title: kind.title, subtitle: kind.subtitle)
-
-            LazyVStack(spacing: 10) {
-                if isLoading && items.isEmpty {
-                    ProgressView()
-                        .tint(AtlassianTheme.blue)
-                        .frame(maxWidth: .infinity, minHeight: 260)
-                } else if let errorMessage {
-                    EmptyStateView(icon: "exclamationmark.triangle", title: "加载失败", message: errorMessage)
-                } else if items.isEmpty {
-                    EmptyStateView(icon: "tray", title: kind.emptyTitle, message: "换个时间刷新看看")
-                } else {
-                    ForEach(items) { item in
-                        NavigationLink {
-                            ContentDetailView(item: item)
-                        } label: {
-                            ContentRow(item: item)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 28)
-        }
-        .background(AtlassianTheme.background)
-        .inlineNavigationTitle()
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    Task { await load() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .disabled(isLoading)
-            }
-        }
-        .refreshable {
-            await load()
-        }
-        .task {
-            await load()
-        }
+    init(kind: FeedKind) {
+        self.kind = kind
     }
 
-    private func load() async {
-        guard let client = sessionStore.client else { return }
+    func load(client: ConfluenceClient?, force: Bool = false) async {
+        guard let client else { return }
+        guard force || !isLoading else { return }
+
         isLoading = true
         errorMessage = nil
 
@@ -99,11 +59,131 @@ struct ContentFeedView: View {
             case .popular:
                 items = try await client.fetchPopular()
             }
+            lastLoadedAt = Date()
         } catch {
             errorMessage = error.localizedDescription
         }
 
         isLoading = false
+    }
+}
+
+struct AdaptiveFeedView: View {
+    @EnvironmentObject private var appSettings: AppSettings
+    @EnvironmentObject private var sessionStore: SessionStore
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    let kind: FeedKind
+    @StateObject private var viewModel: ContentFeedViewModel
+    @State private var selectedItem: ContentItem?
+
+    init(kind: FeedKind) {
+        self.kind = kind
+        _viewModel = StateObject(wrappedValue: ContentFeedViewModel(kind: kind))
+    }
+
+    var body: some View {
+        if appSettings.landscapeSplitEnabled && horizontalSizeClass == .regular {
+            NavigationSplitView {
+                FeedListView(viewModel: viewModel, selectedItem: $selectedItem, compactNavigation: false)
+                    .navigationTitle(kind.title)
+            } detail: {
+                if let selectedItem {
+                    ContentDetailView(item: selectedItem)
+                } else {
+                    EmptyStateView(icon: "rectangle.split.2x1", title: "选择一篇内容", message: "横屏时可在左侧浏览列表，右侧阅读正文和回复")
+                }
+            }
+            .task {
+                await viewModel.load(client: sessionStore.client)
+                selectedItem = selectedItem ?? viewModel.items.first
+            }
+        } else {
+            NavigationStack {
+                FeedListView(viewModel: viewModel, selectedItem: $selectedItem, compactNavigation: true)
+                    .navigationTitle(kind.title)
+            }
+        }
+    }
+}
+
+struct FeedListView: View {
+    @EnvironmentObject private var sessionStore: SessionStore
+    @ObservedObject var viewModel: ContentFeedViewModel
+    @Binding var selectedItem: ContentItem?
+    let compactNavigation: Bool
+
+    var body: some View {
+        List {
+            Section {
+                SectionHeader(title: viewModel.kind.title, subtitle: viewModel.kind.subtitle)
+                    .listRowInsets(EdgeInsets())
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+
+                if viewModel.isLoading && viewModel.items.isEmpty {
+                    ProgressView()
+                        .tint(AtlassianTheme.blue)
+                        .frame(maxWidth: .infinity, minHeight: 260)
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                } else if let errorMessage = viewModel.errorMessage {
+                    EmptyStateView(icon: "exclamationmark.triangle", title: "加载失败", message: errorMessage)
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                } else if viewModel.items.isEmpty {
+                    EmptyStateView(icon: "tray", title: viewModel.kind.emptyTitle, message: "换个时间刷新看看")
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                } else {
+                    ForEach(viewModel.items) { item in
+                        row(for: item)
+                            .listRowInsets(EdgeInsets(top: 5, leading: 16, bottom: 5, trailing: 16))
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                    }
+                }
+            }
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(AtlassianTheme.background)
+        .inlineNavigationTitle()
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    Task { await viewModel.load(client: sessionStore.client, force: true) }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .disabled(viewModel.isLoading)
+            }
+        }
+        .refreshable {
+            await viewModel.load(client: sessionStore.client, force: true)
+        }
+        .task {
+            await viewModel.load(client: sessionStore.client)
+        }
+    }
+
+    @ViewBuilder
+    private func row(for item: ContentItem) -> some View {
+        if compactNavigation {
+            NavigationLink {
+                ContentDetailView(item: item)
+            } label: {
+                ContentRow(item: item, isSelected: false)
+            }
+            .buttonStyle(.plain)
+        } else {
+            Button {
+                selectedItem = item
+            } label: {
+                ContentRow(item: item, isSelected: selectedItem?.id == item.id)
+            }
+            .buttonStyle(.plain)
+        }
     }
 }
 
@@ -193,7 +273,10 @@ struct SearchView: View {
 }
 
 struct ContentRow: View {
+    @EnvironmentObject private var appSettings: AppSettings
+
     let item: ContentItem
+    var isSelected = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -208,7 +291,7 @@ struct ContentRow: View {
 
             VStack(alignment: .leading, spacing: 7) {
                 Text(item.title)
-                    .font(.headline)
+                    .font(appSettings.headlineFont)
                     .foregroundStyle(AtlassianTheme.text)
                     .lineLimit(3)
                     .multilineTextAlignment(.leading)
@@ -217,7 +300,7 @@ struct ContentRow: View {
                     TagView(text: item.typeLabel)
                     if let spaceName = item.spaceName, !spaceName.isEmpty {
                         Text(spaceName)
-                            .font(.caption)
+                            .font(appSettings.fontChoice.font(size: 12 * appSettings.fontScale, relativeTo: .caption))
                             .foregroundStyle(AtlassianTheme.mutedText)
                             .lineLimit(1)
                     }
@@ -225,14 +308,14 @@ struct ContentRow: View {
 
                 if let authorName = item.authorName, !authorName.isEmpty {
                     Text(authorName)
-                        .font(.caption)
+                        .font(appSettings.fontChoice.font(size: 12 * appSettings.fontScale, relativeTo: .caption))
                         .foregroundStyle(AtlassianTheme.mutedText)
                         .lineLimit(1)
                 }
 
                 if !item.activitySummary.isEmpty {
                     Text(item.activitySummary)
-                        .font(.caption)
+                        .font(appSettings.fontChoice.font(size: 12 * appSettings.fontScale, relativeTo: .caption))
                         .foregroundStyle(AtlassianTheme.mutedText)
                         .lineLimit(1)
                 }
@@ -246,7 +329,7 @@ struct ContentRow: View {
                 .padding(.top, 5)
         }
         .padding(14)
-        .background(AtlassianTheme.surface)
+        .background(isSelected ? AtlassianTheme.blue.opacity(0.10) : AtlassianTheme.surface)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -264,11 +347,13 @@ struct ContentRow: View {
 }
 
 struct TagView: View {
+    @EnvironmentObject private var appSettings: AppSettings
+
     let text: String
 
     var body: some View {
         Text(text)
-            .font(.caption.weight(.semibold))
+            .font(appSettings.fontChoice.font(size: 12 * appSettings.fontScale, relativeTo: .caption))
             .foregroundStyle(AtlassianTheme.blue)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)

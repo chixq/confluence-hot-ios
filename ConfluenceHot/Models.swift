@@ -296,11 +296,59 @@ struct ContentDetail: Decodable {
 
 struct ContentBody: Decodable {
     let view: BodyRepresentation?
+    let storage: BodyRepresentation?
 }
 
 struct BodyRepresentation: Decodable {
     let value: String
     let representation: String?
+}
+
+struct CommentResponse: Decodable {
+    let results: [CommentResult]
+}
+
+struct CommentResult: Decodable {
+    let id: String
+    let type: String?
+    let title: String?
+    let body: ContentBody?
+    let history: ContentHistory?
+    let version: ContentVersion?
+    let links: Links?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case type
+        case title
+        case body
+        case history
+        case version
+        case links = "_links"
+    }
+
+    func item() -> CommentItem {
+        let update = version
+        let created = history?.createdBy
+        let dateString = update?.friendlyWhen ?? update?.when ?? history?.createdDate
+        let parsedDate = DateParser.parse(update?.when ?? history?.createdDate)
+
+        return CommentItem(
+            id: id,
+            authorName: update?.by?.displayName ?? created?.displayName ?? "匿名用户",
+            dateText: DateParser.displayText(from: dateString, date: parsedDate),
+            html: body?.view?.value ?? body?.storage?.value ?? "",
+            webPath: links?.webUI ?? links?.tinyUI
+        )
+    }
+}
+
+struct CommentItem: Identifiable, Equatable {
+    let id: String
+    let authorName: String
+    let dateText: String?
+    let html: String
+    let webPath: String?
 }
 
 enum DateParser {
