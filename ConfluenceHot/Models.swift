@@ -135,6 +135,15 @@ struct ContentItem: Identifiable, Equatable {
 
 struct ContentSearchResponse: Decodable {
     let results: [ContentSearchResult]
+    let size: Int?
+    let start: Int?
+    let limit: Int?
+    let totalSize: Int?
+
+    var hasMore: Bool {
+        guard let size, let limit else { return results.count >= 30 }
+        return size >= limit
+    }
 }
 
 struct ContentSearchResult: Decodable {
@@ -144,6 +153,7 @@ struct ContentSearchResult: Decodable {
     let title: String
     let space: ConfluenceSpace?
     let history: ContentHistory?
+    let body: ContentBody?
     let links: Links?
 
     enum CodingKeys: String, CodingKey {
@@ -153,6 +163,7 @@ struct ContentSearchResult: Decodable {
         case title
         case space
         case history
+        case body
         case links = "_links"
     }
 
@@ -173,7 +184,7 @@ struct ContentSearchResult: Decodable {
             webPath: links?.webUI ?? links?.tinyUI,
             likeCount: nil,
             commentCount: nil,
-            excerpt: nil,
+            excerpt: body?.view?.value.strippedHTMLExcerpt(maxLength: 120),
             origin: origin
         )
     }
@@ -220,6 +231,14 @@ struct ConfluenceSpace: Decodable, Identifiable, Equatable {
 
 struct SpaceResponse: Decodable {
     let results: [ConfluenceSpace]
+    let size: Int?
+    let start: Int?
+    let limit: Int?
+
+    var hasMore: Bool {
+        guard let size, let limit else { return results.count >= 50 }
+        return size >= limit
+    }
 }
 
 struct PopularStreamResponse: Decodable {
@@ -351,6 +370,86 @@ struct CommentItem: Identifiable, Equatable {
     let webPath: String?
 }
 
+struct SearchUserResponse: Decodable {
+    let results: [SearchUserResult]
+    let size: Int?
+    let start: Int?
+    let limit: Int?
+    let totalSize: Int?
+}
+
+struct SearchUserResult: Decodable {
+    let user: UserSummary?
+    let username: String?
+    let displayName: String?
+}
+
+struct AdminSystemInfo: Equatable {
+    let generatedAt: Date
+    let userCount: Int?
+    let pageCount: Int?
+    let blogPostCount: Int?
+    let loginAuditCount: Int?
+    let rawSystemInfo: [String: String]
+}
+
+struct GenericCountResponse: Decodable {
+    let size: Int?
+    let totalSize: Int?
+    let totalCount: Int?
+    let results: [JSONValue]?
+
+    var countValue: Int? {
+        totalSize ?? totalCount ?? size ?? results?.count
+    }
+}
+
+enum JSONValue: Decodable, Equatable, CustomStringConvertible {
+    case string(String)
+    case number(Double)
+    case bool(Bool)
+    case object([String: JSONValue])
+    case array([JSONValue])
+    case null
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            self = .null
+        } else if let value = try? container.decode(Bool.self) {
+            self = .bool(value)
+        } else if let value = try? container.decode(Double.self) {
+            self = .number(value)
+        } else if let value = try? container.decode(String.self) {
+            self = .string(value)
+        } else if let value = try? container.decode([JSONValue].self) {
+            self = .array(value)
+        } else {
+            self = .object(try container.decode([String: JSONValue].self))
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .string(let value):
+            return value
+        case .number(let value):
+            if value.rounded() == value {
+                return String(Int(value))
+            }
+            return String(value)
+        case .bool(let value):
+            return value ? "true" : "false"
+        case .object(let value):
+            return "\(value.count) 项"
+        case .array(let value):
+            return "\(value.count) 项"
+        case .null:
+            return ""
+        }
+    }
+}
+
 enum DateParser {
     private static let isoWithColon: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
@@ -404,5 +503,21 @@ private extension String {
             value.removeLast()
         }
         return value
+    }
+
+    func strippedHTMLExcerpt(maxLength: Int) -> String {
+        let withoutTags = replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+        let decoded = withoutTags
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+        let collapsed = decoded
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        guard collapsed.count > maxLength else { return collapsed }
+        return String(collapsed.prefix(maxLength)) + "..."
     }
 }

@@ -127,7 +127,14 @@ struct MainTabView: View {
         TabView {
             AdaptiveFeedView(kind: .recent)
             .tabItem {
-                Label("最新", systemImage: "clock")
+                Label("工作", systemImage: "rectangle.stack")
+            }
+
+            NavigationStack {
+                SpacesView()
+            }
+            .tabItem {
+                Label("空间", systemImage: "folder")
             }
 
             AdaptiveFeedView(kind: .popular)

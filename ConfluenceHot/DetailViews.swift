@@ -16,6 +16,8 @@ struct ContentDetailView: View {
     @State private var commentsErrorMessage: String?
     @State private var replyText = ""
     @State private var webContentHeight: CGFloat = 420
+    @State private var exportedHTMLFile: ExportedHTMLFile?
+    @State private var exportErrorMessage: String?
 
     var body: some View {
         ScrollView {
@@ -44,6 +46,13 @@ struct ContentDetailView: View {
                         .padding(.horizontal, 16)
                 }
 
+                if let exportErrorMessage {
+                    Text(exportErrorMessage)
+                        .font(appSettings.subheadlineFont)
+                        .foregroundStyle(AtlassianTheme.red)
+                        .padding(.horizontal, 16)
+                }
+
                 CommentSectionView(
                     comments: comments,
                     isLoading: isLoadingComments,
@@ -62,16 +71,31 @@ struct ContentDetailView: View {
         .liquidNavigationChrome()
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                if let baseURL = sessionStore.configuration?.baseURL,
-                   let url = item.webURL(baseURL: baseURL) {
-                    Button {
-                        openURL(url)
-                    } label: {
-                        Image(systemName: "safari")
+                Menu {
+                    if let baseURL = sessionStore.configuration?.baseURL,
+                       let url = item.webURL(baseURL: baseURL) {
+                        Button {
+                            openURL(url)
+                        } label: {
+                            Label("浏览器打开", systemImage: "safari")
+                        }
                     }
+
+                    Button {
+                        exportHTML()
+                    } label: {
+                        Label("导出 HTML", systemImage: "square.and.arrow.up")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
                 }
             }
         }
+        #if os(iOS)
+        .sheet(item: $exportedHTMLFile) { file in
+            ActivityView(activityItems: [file.url])
+        }
+        #endif
         .task(id: item.id) {
             resetForCurrentItem()
             await load()
@@ -85,6 +109,7 @@ struct ContentDetailView: View {
         commentsErrorMessage = nil
         replyText = ""
         webContentHeight = 420
+        exportErrorMessage = nil
     }
 
     private func load() async {
@@ -140,6 +165,81 @@ struct ContentDetailView: View {
         }
 
         isPostingComment = false
+    }
+
+    private func exportHTML() {
+        guard let detail else {
+            exportErrorMessage = "正文尚未加载完成"
+            return
+        }
+
+        do {
+            let html = exportedHTML(detail: detail, comments: comments)
+            let fileName = "\(safeFilename(detail.title)).html"
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+            try html.write(to: url, atomically: true, encoding: .utf8)
+            exportedHTMLFile = ExportedHTMLFile(url: url)
+            exportErrorMessage = nil
+        } catch {
+            exportErrorMessage = "导出失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func exportedHTML(detail: ContentDetail, comments: [CommentItem]) -> String {
+        let commentHTML = comments.map { comment in
+            """
+            <section class="comment">
+              <div class="comment-meta">\(htmlEscaped(comment.authorName)) \(htmlEscaped(comment.dateText ?? ""))</div>
+              <div>\(comment.html)</div>
+            </section>
+            """
+        }.joined(separator: "\n")
+
+        return """
+        <!doctype html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>\(htmlEscaped(detail.title))</title>
+          <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; line-height: 1.62; margin: 32px auto; max-width: 880px; padding: 0 18px; color: #172B4D; }
+            h1 { line-height: 1.2; }
+            img, video { max-width: 100%; height: auto; border-radius: 8px; }
+            table { border-collapse: collapse; min-width: 100%; }
+            th, td { border: 1px solid #DFE1E6; padding: 8px 10px; vertical-align: top; }
+            pre { overflow-x: auto; background: #F4F5F7; padding: 12px; border-radius: 8px; }
+            .meta, .comment-meta { color: #626F86; font-size: 14px; }
+            .comments { margin-top: 36px; border-top: 1px solid #DFE1E6; padding-top: 20px; }
+            .comment { margin: 16px 0; padding-bottom: 16px; border-bottom: 1px solid #F1F2F4; }
+          </style>
+        </head>
+        <body>
+          <h1>\(htmlEscaped(detail.title))</h1>
+          <p class="meta">\(htmlEscaped(item.activitySummary))</p>
+          <article>\(detail.renderedHTML)</article>
+          <section class="comments">
+            <h2>回复</h2>
+            \(commentHTML.isEmpty ? "<p class=\"meta\">暂无回复</p>" : commentHTML)
+          </section>
+        </body>
+        </html>
+        """
+    }
+
+    private func safeFilename(_ title: String) -> String {
+        let invalid = CharacterSet(charactersIn: "/\\?%*|\"<>:")
+        let cleaned = title.components(separatedBy: invalid).joined(separator: "-")
+        let trimmed = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Confluence-Page" : String(trimmed.prefix(80))
+    }
+
+    private func htmlEscaped(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
     }
 
     private func wrappedHTML(_ body: String) -> String {
@@ -222,6 +322,14 @@ struct ContentDetailView: View {
         </body>
         </html>
         """
+    }
+}
+
+struct ExportedHTMLFile: Identifiable {
+    let url: URL
+
+    var id: String {
+        url.absoluteString
     }
 }
 
@@ -408,6 +516,16 @@ struct CommentRow: View {
 }
 
 #if os(iOS)
+struct ActivityView: UIViewControllerRepresentable {
+    let activityItems: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
 struct HTMLContentView: UIViewRepresentable {
     let html: String
     let baseURL: URL?

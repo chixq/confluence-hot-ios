@@ -7,9 +7,12 @@
 - 支持输入第三方自建站点 URL、用户名和密码。
 - 使用 Basic Auth 访问 Confluence REST API，密码保存在 iOS Keychain。
 - “热门”优先读取 `/rest/popular/1/stream/content`，站点未启用该插件时降级到 CQL 最近活动内容。
-- “最新”使用 `/rest/api/content/search` 和 CQL 拉取页面、博客。
-- 支持搜索、详情渲染、评论列表、添加回复，以及跳转到 Confluence Web 页面。
-- 支持夜间模式、字号调整、霞鹜文楷字体、横屏分栏阅读；界面采用接近 iPadOS/Apple Notes 的轻量 Liquid Glass 分组风格。
+- “最新”使用 `/rest/api/content/search` 和 CQL 分页拉取页面、博客，列表到底部自动加载更多。
+- 支持空间列表，进入空间后可继续分页浏览该空间下的页面和博客。
+- 支持作者/内容双栏搜索，搜索结果会高亮命中的标题、作者和摘要关键词。
+- 支持详情渲染、评论列表、添加回复、跳转到 Confluence Web 页面，以及导出单个 HTML 文件并分享。
+- 支持夜间模式、字号调整、霞鹜文楷字体、横屏分栏阅读；界面回到接近官方 Confluence App 的传统高性能列表风格。
+- 设置页提供管理员系统信息读取入口，点击时实时读取站点系统信息和用户、页面、博客、登录审计等可用统计。
 - 支持本地热门提醒：每天或每周在系统允许的后台刷新窗口中检查新的热门内容。
 
 ## 验证过的接口
@@ -18,6 +21,7 @@
 
 - `GET /rest/api/user/current`
 - `GET /rest/api/content/search`
+- `GET /rest/api/space`
 - `GET /rest/popular/1/stream/content`
 - `GET /rest/api/content/{id}/child/comment`
 

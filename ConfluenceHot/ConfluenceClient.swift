@@ -20,11 +20,12 @@ final class ConfluenceClient {
         try await request("/rest/api/user/current")
     }
 
-    func fetchRecentlyUpdated(limit: Int = 30) async throws -> [ContentItem] {
+    func fetchRecentlyUpdated(start: Int = 0, limit: Int = 30) async throws -> [ContentItem] {
         let response: ContentSearchResponse = try await request(
             "/rest/api/content/search",
             queryItems: [
                 URLQueryItem(name: "cql", value: "type in (page,blogpost) order by lastmodified desc"),
+                URLQueryItem(name: "start", value: String(start)),
                 URLQueryItem(name: "limit", value: String(limit)),
                 URLQueryItem(name: "expand", value: "space,history.lastUpdated")
             ]
@@ -32,11 +33,14 @@ final class ConfluenceClient {
         return response.results.map { $0.item(origin: .recent) }
     }
 
-    func fetchPopular(limit: Int = 30) async throws -> [ContentItem] {
+    func fetchPopular(start: Int = 0, limit: Int = 30) async throws -> [ContentItem] {
         do {
             let response: PopularStreamResponse = try await request(
                 "/rest/popular/1/stream/content",
-                queryItems: [URLQueryItem(name: "limit", value: String(limit))]
+                queryItems: [
+                    URLQueryItem(name: "start", value: String(start)),
+                    URLQueryItem(name: "limit", value: String(limit))
+                ]
             )
             let items = response.streamItems.map { $0.item() }
             if !items.isEmpty {
@@ -48,13 +52,14 @@ final class ConfluenceClient {
             // Some Server/Data Center installations disable the popular stream plugin.
         }
 
-        return try await fetchRecentlyUpdated(limit: limit)
+        return try await fetchRecentlyUpdated(start: start, limit: limit)
     }
 
-    func fetchSpaces(limit: Int = 50) async throws -> [ConfluenceSpace] {
+    func fetchSpaces(start: Int = 0, limit: Int = 50) async throws -> [ConfluenceSpace] {
         let response: SpaceResponse = try await request(
             "/rest/api/space",
             queryItems: [
+                URLQueryItem(name: "start", value: String(start)),
                 URLQueryItem(name: "limit", value: String(limit)),
                 URLQueryItem(name: "type", value: "global")
             ]
@@ -62,20 +67,49 @@ final class ConfluenceClient {
         return response.results
     }
 
+    func fetchSpaceContent(spaceKey: String, start: Int = 0, limit: Int = 30) async throws -> [ContentItem] {
+        let escapedKey = Self.escapeCQL(spaceKey)
+        let response: ContentSearchResponse = try await request(
+            "/rest/api/content/search",
+            queryItems: [
+                URLQueryItem(name: "cql", value: "space = \"\(escapedKey)\" and type in (page,blogpost) order by lastmodified desc"),
+                URLQueryItem(name: "start", value: String(start)),
+                URLQueryItem(name: "limit", value: String(limit)),
+                URLQueryItem(name: "expand", value: "space,history.lastUpdated")
+            ]
+        )
+        return response.results.map { $0.item(origin: .search) }
+    }
+
     func search(_ query: String, limit: Int = 30) async throws -> [ContentItem] {
-        let cleaned = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty else {
-            return try await fetchRecentlyUpdated(limit: limit)
+        try await searchContent(contentQuery: query, authorQuery: "", start: 0, limit: limit)
+    }
+
+    func searchContent(contentQuery: String, authorQuery: String, start: Int = 0, limit: Int = 30) async throws -> [ContentItem] {
+        let cleaned = contentQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedAuthor = authorQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty || !cleanedAuthor.isEmpty else {
+            return try await fetchRecentlyUpdated(start: start, limit: limit)
         }
 
-        let escaped = Self.escapeCQL(cleaned)
-        let cql = "type in (page,blogpost) and (title ~ \"\(escaped)\" or text ~ \"\(escaped)\") order by lastmodified desc"
+        var filters = ["type in (page,blogpost)"]
+        if !cleaned.isEmpty {
+            let escaped = Self.escapeCQL(cleaned)
+            filters.append("(title ~ \"\(escaped)\" or text ~ \"\(escaped)\")")
+        }
+        if !cleanedAuthor.isEmpty {
+            let escapedAuthor = Self.escapeCQL(cleanedAuthor)
+            filters.append("(creator = \"\(escapedAuthor)\" or contributor = \"\(escapedAuthor)\")")
+        }
+
+        let cql = "\(filters.joined(separator: " and ")) order by lastmodified desc"
         let response: ContentSearchResponse = try await request(
             "/rest/api/content/search",
             queryItems: [
                 URLQueryItem(name: "cql", value: cql),
+                URLQueryItem(name: "start", value: String(start)),
                 URLQueryItem(name: "limit", value: String(limit)),
-                URLQueryItem(name: "expand", value: "space,history.lastUpdated")
+                URLQueryItem(name: "expand", value: "space,history.lastUpdated,body.view")
             ]
         )
         return response.results.map { $0.item(origin: .search) }
@@ -122,6 +156,25 @@ final class ConfluenceClient {
         return result.item()
     }
 
+    func fetchAdminSystemInfo() async throws -> AdminSystemInfo {
+        let systemJSON: JSONValue = try await request("/rest/api/settings/systemInfo")
+        let systemInfo = Self.flattenSystemInfo(systemJSON)
+
+        async let users = fetchUserCount()
+        async let pages = fetchContentCount(cql: "type = page")
+        async let blogs = fetchContentCount(cql: "type = blogpost")
+        async let logins = fetchAuditCount(searchString: "login")
+
+        return AdminSystemInfo(
+            generatedAt: Date(),
+            userCount: await users,
+            pageCount: await pages,
+            blogPostCount: await blogs,
+            loginAuditCount: await logins,
+            rawSystemInfo: systemInfo
+        )
+    }
+
     private func request<T: Decodable, Body: Encodable>(
         _ path: String,
         method: String = "GET",
@@ -163,6 +216,51 @@ final class ConfluenceClient {
         try await request(path, method: "GET", queryItems: queryItems, body: Optional<EmptyBody>.none)
     }
 
+    private func fetchUserCount() async -> Int? {
+        do {
+            let response: SearchUserResponse = try await request(
+                "/rest/api/search/user",
+                queryItems: [
+                    URLQueryItem(name: "cql", value: "user.fullname ~ \"\""),
+                    URLQueryItem(name: "limit", value: "1")
+                ]
+            )
+            return response.totalSize ?? response.size
+        } catch {
+            return nil
+        }
+    }
+
+    private func fetchContentCount(cql: String) async -> Int? {
+        do {
+            let response: ContentSearchResponse = try await request(
+                "/rest/api/content/search",
+                queryItems: [
+                    URLQueryItem(name: "cql", value: cql),
+                    URLQueryItem(name: "limit", value: "1")
+                ]
+            )
+            return response.totalSize
+        } catch {
+            return nil
+        }
+    }
+
+    private func fetchAuditCount(searchString: String) async -> Int? {
+        do {
+            let response: GenericCountResponse = try await request(
+                "/rest/api/audit",
+                queryItems: [
+                    URLQueryItem(name: "searchString", value: searchString),
+                    URLQueryItem(name: "limit", value: "1")
+                ]
+            )
+            return response.totalSize ?? response.totalCount
+        } catch {
+            return nil
+        }
+    }
+
     private func makeURL(path: String, queryItems: [URLQueryItem]) throws -> URL {
         guard var components = URLComponents(url: configuration.baseURL, resolvingAgainstBaseURL: false) else {
             throw ConfluenceClientError.invalidBaseURL
@@ -189,6 +287,28 @@ final class ConfluenceClient {
         value
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    private static func flattenSystemInfo(_ value: JSONValue) -> [String: String] {
+        guard case .object(let object) = value else { return [:] }
+        var output: [String: String] = [:]
+        for (key, value) in object {
+            switch value {
+            case .object(let nested):
+                for (nestedKey, nestedValue) in nested {
+                    let description = nestedValue.description
+                    if !description.isEmpty {
+                        output["\(key).\(nestedKey)"] = description
+                    }
+                }
+            default:
+                let description = value.description
+                if !description.isEmpty {
+                    output[key] = description
+                }
+            }
+        }
+        return output
     }
 
     private static func storageHTML(from text: String) -> String {

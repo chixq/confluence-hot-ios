@@ -7,7 +7,10 @@ struct SettingsView: View {
     @State private var username = ""
     @State private var password = ""
     @State private var isSaving = false
+    @State private var isLoadingSystemInfo = false
     @State private var notificationStatusText: String?
+    @State private var systemInfo: AdminSystemInfo?
+    @State private var systemInfoError: String?
 
     var body: some View {
         ScrollView {
@@ -136,6 +139,37 @@ struct SettingsView: View {
                     }
                 }
 
+                settingsCard(title: "管理员") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("管理员可点击读取当前站点的系统信息和统计概览。数据不会缓存，每次点击都会重新请求。")
+                            .font(appSettings.subheadlineFont)
+                            .foregroundStyle(AtlassianTheme.mutedText)
+
+                        Button {
+                            Task { await loadSystemInfo() }
+                        } label: {
+                            if isLoadingSystemInfo {
+                                ProgressView()
+                                    .tint(.white)
+                            } else {
+                                Label("读取系统信息", systemImage: "server.rack")
+                            }
+                        }
+                        .buttonStyle(PrimaryButtonStyle())
+                        .disabled(isLoadingSystemInfo)
+
+                        if let systemInfoError {
+                            Text(systemInfoError)
+                                .font(appSettings.subheadlineFont)
+                                .foregroundStyle(AtlassianTheme.red)
+                        }
+
+                        if let systemInfo {
+                            AdminSystemInfoView(info: systemInfo)
+                        }
+                    }
+                }
+
                 settingsCard(title: "会话") {
                     Button {
                         sessionStore.signOut()
@@ -206,5 +240,68 @@ struct SettingsView: View {
         case .weekly:
             notificationStatusText = "已安排每周检查新的热门内容"
         }
+    }
+
+    private func loadSystemInfo() async {
+        guard let client = sessionStore.client else { return }
+        isLoadingSystemInfo = true
+        systemInfoError = nil
+        do {
+            systemInfo = try await client.fetchAdminSystemInfo()
+        } catch {
+            systemInfoError = "读取失败：\(error.localizedDescription)"
+        }
+        isLoadingSystemInfo = false
+    }
+}
+
+struct AdminSystemInfoView: View {
+    @EnvironmentObject private var appSettings: AppSettings
+
+    let info: AdminSystemInfo
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("生成时间：\(info.generatedAt.formatted(date: .abbreviated, time: .standard))")
+                .font(appSettings.subheadlineFont)
+                .foregroundStyle(AtlassianTheme.mutedText)
+
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                metric("用户", value: info.userCount)
+                metric("页面", value: info.pageCount)
+                metric("博客", value: info.blogPostCount)
+                metric("登录审计", value: info.loginAuditCount)
+            }
+
+            if !info.rawSystemInfo.isEmpty {
+                Divider()
+                ForEach(info.rawSystemInfo.keys.sorted().prefix(12), id: \.self) { key in
+                    HStack(alignment: .top) {
+                        Text(key)
+                            .font(appSettings.fontChoice.font(size: 12 * appSettings.fontScale, relativeTo: .caption))
+                            .foregroundStyle(AtlassianTheme.mutedText)
+                            .frame(width: 130, alignment: .leading)
+                        Text(info.rawSystemInfo[key] ?? "")
+                            .font(appSettings.fontChoice.font(size: 12 * appSettings.fontScale, relativeTo: .caption))
+                            .foregroundStyle(AtlassianTheme.text)
+                            .lineLimit(3)
+                    }
+                }
+            }
+        }
+    }
+
+    private func metric(_ title: String, value: Int?) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(appSettings.fontChoice.font(size: 12 * appSettings.fontScale, relativeTo: .caption))
+                .foregroundStyle(AtlassianTheme.mutedText)
+            Text(value.map(String.init) ?? "不可用")
+                .font(appSettings.headlineFont)
+                .foregroundStyle(AtlassianTheme.text)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(AtlassianTheme.secondarySurface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }

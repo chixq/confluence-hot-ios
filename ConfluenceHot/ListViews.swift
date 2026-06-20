@@ -6,30 +6,37 @@ enum FeedKind {
 
     var title: String {
         switch self {
-        case .recent:
-            return "最新"
-        case .popular:
-            return "热门"
+        case .recent: return "Recently worked on"
+        case .popular: return "Popular"
+        }
+    }
+
+    var tabTitle: String {
+        switch self {
+        case .recent: return "工作"
+        case .popular: return "热门"
         }
     }
 
     var subtitle: String {
         switch self {
-        case .recent:
-            return "最近更新的页面和博客"
-        case .popular:
-            return "站点中获得更多互动的内容"
+        case .recent: return "最近更新的页面和博客"
+        case .popular: return "站点中获得更多互动的内容"
         }
     }
 
     var emptyTitle: String {
         switch self {
-        case .recent:
-            return "暂无更新"
-        case .popular:
-            return "暂无热门内容"
+        case .recent: return "暂无更新"
+        case .popular: return "暂无热门内容"
         }
     }
+}
+
+struct ContentDateSection: Identifiable {
+    let id: String
+    let title: String
+    let items: [ContentItem]
 }
 
 @MainActor
@@ -38,8 +45,13 @@ final class ContentFeedViewModel: ObservableObject {
 
     @Published private(set) var items: [ContentItem] = []
     @Published private(set) var isLoading = false
+    @Published private(set) var isLoadingMore = false
+    @Published private(set) var hasMore = true
     @Published var errorMessage: String?
     @Published var lastLoadedAt: Date?
+
+    private let pageSize = 30
+    private var nextStart = 0
 
     init(kind: FeedKind) {
         self.kind = kind
@@ -47,24 +59,59 @@ final class ContentFeedViewModel: ObservableObject {
 
     func load(client: ConfluenceClient?, force: Bool = false) async {
         guard let client else { return }
-        guard force || !isLoading else { return }
+        guard force || (!isLoading && items.isEmpty) else { return }
 
         isLoading = true
         errorMessage = nil
+        nextStart = 0
+        hasMore = true
 
         do {
-            switch kind {
-            case .recent:
-                items = try await client.fetchRecentlyUpdated()
-            case .popular:
-                items = try await client.fetchPopular()
-            }
+            let page = try await fetchPage(client: client, start: nextStart)
+            items = page
+            nextStart = page.count
+            hasMore = page.count >= pageSize
             lastLoadedAt = Date()
         } catch {
             errorMessage = error.localizedDescription
         }
 
         isLoading = false
+    }
+
+    func loadMoreIfNeeded(currentItem item: ContentItem?, client: ConfluenceClient?) async {
+        guard let client, hasMore, !isLoading, !isLoadingMore else { return }
+        guard let item else {
+            await loadMore(client: client)
+            return
+        }
+        guard items.suffix(6).contains(where: { $0.id == item.id }) else { return }
+        await loadMore(client: client)
+    }
+
+    private func loadMore(client: ConfluenceClient) async {
+        isLoadingMore = true
+        defer { isLoadingMore = false }
+
+        do {
+            let page = try await fetchPage(client: client, start: nextStart)
+            let existingIDs = Set(items.map(\.id))
+            let newItems = page.filter { !existingIDs.contains($0.id) }
+            items.append(contentsOf: newItems)
+            nextStart += page.count
+            hasMore = page.count >= pageSize && !newItems.isEmpty
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func fetchPage(client: ConfluenceClient, start: Int) async throws -> [ContentItem] {
+        switch kind {
+        case .recent:
+            return try await client.fetchRecentlyUpdated(start: start, limit: pageSize)
+        case .popular:
+            return try await client.fetchPopular(start: start, limit: pageSize)
+        }
     }
 }
 
@@ -116,7 +163,6 @@ struct AdaptiveFeedView: View {
                     }
                 }
             }
-            .animation(.spring(response: 0.35, dampingFraction: 0.86), value: shouldUseSplit)
         }
     }
 
@@ -134,32 +180,67 @@ struct AdaptiveFeedView: View {
 
 struct FeedListView: View {
     @EnvironmentObject private var sessionStore: SessionStore
-    @EnvironmentObject private var appSettings: AppSettings
     @ObservedObject var viewModel: ContentFeedViewModel
     @Binding var selectedItem: ContentItem?
     let compactNavigation: Bool
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                SectionHeader(title: viewModel.kind.title, subtitle: viewModel.kind.subtitle)
-
-                if let lastLoadedAt = viewModel.lastLoadedAt {
-                    HStack(spacing: 6) {
-                        Image(systemName: "checkmark.icloud")
-                        Text("已更新 \(lastLoadedAt.formatted(date: .omitted, time: .shortened))")
+        List {
+            if viewModel.isLoading && viewModel.items.isEmpty {
+                loadingRow
+            } else if let errorMessage = viewModel.errorMessage, viewModel.items.isEmpty {
+                EmptyStateView(icon: "exclamationmark.triangle", title: "加载失败", message: errorMessage)
+                    .listRowBackground(AtlassianTheme.background)
+                    .listRowSeparator(.hidden)
+            } else if viewModel.items.isEmpty {
+                EmptyStateView(icon: "tray", title: viewModel.kind.emptyTitle, message: "换个时间刷新看看")
+                    .listRowBackground(AtlassianTheme.background)
+                    .listRowSeparator(.hidden)
+            } else {
+                ForEach(groupedItems) { section in
+                    Section {
+                        ForEach(section.items) { item in
+                            row(for: item)
+                                .onAppear {
+                                    Task {
+                                        await viewModel.loadMoreIfNeeded(currentItem: item, client: sessionStore.client)
+                                    }
+                                }
+                        }
+                    } header: {
+                        Text(section.title)
+                            .font(.system(size: 21, weight: .semibold))
+                            .textCase(nil)
+                            .foregroundStyle(AtlassianTheme.mutedText)
+                            .padding(.top, 16)
                     }
-                    .font(appSettings.fontChoice.font(size: 12 * appSettings.fontScale, relativeTo: .caption))
-                    .foregroundStyle(AtlassianTheme.mutedText)
-                    .padding(.horizontal, 22)
-                    .padding(.top, -8)
                 }
 
-                content
+                if viewModel.isLoadingMore {
+                    HStack {
+                        Spacer()
+                        ProgressView()
+                            .tint(AtlassianTheme.blue)
+                        Spacer()
+                    }
+                    .listRowBackground(AtlassianTheme.background)
+                    .listRowSeparator(.hidden)
+                } else if viewModel.hasMore {
+                    Color.clear
+                        .frame(height: 1)
+                        .onAppear {
+                            Task {
+                                await viewModel.loadMoreIfNeeded(currentItem: nil, client: sessionStore.client)
+                            }
+                        }
+                        .listRowBackground(AtlassianTheme.background)
+                        .listRowSeparator(.hidden)
+                }
             }
-            .padding(.bottom, 28)
         }
-        .background(LiquidBackground())
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(AtlassianTheme.background)
         .inlineNavigationTitle()
         .liquidNavigationChrome()
         .toolbar {
@@ -180,34 +261,16 @@ struct FeedListView: View {
         }
     }
 
-    @ViewBuilder
-    private var content: some View {
-        if viewModel.isLoading && viewModel.items.isEmpty {
-            ProgressView()
-                .tint(AtlassianTheme.blue)
-                .frame(maxWidth: .infinity, minHeight: 260)
-                .padding(.horizontal, 16)
-        } else if let errorMessage = viewModel.errorMessage {
-            EmptyStateView(icon: "exclamationmark.triangle", title: "加载失败", message: errorMessage)
-                .padding(.horizontal, 16)
-        } else if viewModel.items.isEmpty {
-            EmptyStateView(icon: "tray", title: viewModel.kind.emptyTitle, message: "换个时间刷新看看")
-                .padding(.horizontal, 16)
-        } else {
-            LazyVStack(spacing: 0) {
-                ForEach(Array(viewModel.items.enumerated()), id: \.element.id) { index, item in
-                    row(for: item)
-                    if index < viewModel.items.count - 1 {
-                        Divider()
-                            .padding(.leading, 72)
-                            .padding(.trailing, 12)
-                    }
-                }
-            }
-            .padding(8)
-            .liquidGlassPanel(cornerRadius: 30)
-            .padding(.horizontal, 16)
-        }
+    private var loadingRow: some View {
+        ProgressView()
+            .tint(AtlassianTheme.blue)
+            .frame(maxWidth: .infinity, minHeight: 260)
+            .listRowBackground(AtlassianTheme.background)
+            .listRowSeparator(.hidden)
+    }
+
+    private var groupedItems: [ContentDateSection] {
+        ContentGrouper.group(items: viewModel.items)
     }
 
     @ViewBuilder
@@ -217,9 +280,9 @@ struct FeedListView: View {
                 ContentDetailView(item: item)
                     .id(item.id)
             } label: {
-                ContentRow(item: item, isSelected: false, showsChevron: true)
+                ContentRow(item: item)
             }
-            .buttonStyle(.plain)
+            .listRowBackground(AtlassianTheme.background)
         } else {
             Button {
                 selectedItem = item
@@ -227,6 +290,73 @@ struct FeedListView: View {
                 ContentRow(item: item, isSelected: selectedItem?.id == item.id, showsChevron: false)
             }
             .buttonStyle(.plain)
+            .listRowBackground(AtlassianTheme.background)
+        }
+    }
+}
+
+@MainActor
+final class SearchViewModel: ObservableObject {
+    @Published private(set) var items: [ContentItem] = []
+    @Published private(set) var isLoading = false
+    @Published private(set) var isLoadingMore = false
+    @Published private(set) var hasMore = false
+    @Published var errorMessage: String?
+
+    private let pageSize = 30
+    private var nextStart = 0
+    private var contentQuery = ""
+    private var authorQuery = ""
+
+    func search(client: ConfluenceClient?, content: String, author: String) async {
+        guard let client else { return }
+        contentQuery = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        authorQuery = author.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !contentQuery.isEmpty || !authorQuery.isEmpty else {
+            items = []
+            hasMore = false
+            return
+        }
+
+        isLoading = true
+        errorMessage = nil
+        nextStart = 0
+
+        do {
+            let page = try await client.searchContent(contentQuery: contentQuery, authorQuery: authorQuery, start: nextStart, limit: pageSize)
+            items = page
+            nextStart = page.count
+            hasMore = page.count >= pageSize
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+
+        isLoading = false
+    }
+
+    func loadMoreIfNeeded(currentItem item: ContentItem?, client: ConfluenceClient?) async {
+        guard let client, hasMore, !isLoading, !isLoadingMore else { return }
+        guard let item else {
+            await loadMore(client: client)
+            return
+        }
+        guard items.suffix(6).contains(where: { $0.id == item.id }) else { return }
+        await loadMore(client: client)
+    }
+
+    private func loadMore(client: ConfluenceClient) async {
+        isLoadingMore = true
+        defer { isLoadingMore = false }
+
+        do {
+            let page = try await client.searchContent(contentQuery: contentQuery, authorQuery: authorQuery, start: nextStart, limit: pageSize)
+            let existingIDs = Set(items.map(\.id))
+            let newItems = page.filter { !existingIDs.contains($0.id) }
+            items.append(contentsOf: newItems)
+            nextStart += page.count
+            hasMore = page.count >= pageSize && !newItems.isEmpty
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 }
@@ -234,110 +364,136 @@ struct FeedListView: View {
 struct SearchView: View {
     @EnvironmentObject private var sessionStore: SessionStore
     @EnvironmentObject private var appSettings: AppSettings
-    @State private var query = ""
-    @State private var items: [ContentItem] = []
-    @State private var isLoading = false
-    @State private var errorMessage: String?
+    @StateObject private var viewModel = SearchViewModel()
+    @State private var contentQuery = ""
+    @State private var authorQuery = ""
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                SectionHeader(title: "搜索", subtitle: sessionStore.configuration?.baseURL.host)
+        List {
+            Section {
+                searchFields
+                    .listRowBackground(AtlassianTheme.background)
+                    .listRowSeparator(.hidden)
+            }
 
-                VStack(spacing: 12) {
-                    HStack(spacing: 10) {
-                        Image(systemName: "magnifyingglass")
-                            .foregroundStyle(AtlassianTheme.mutedText)
-                        TextField("标题或正文", text: $query)
-                            .submitLabel(.search)
-                            .autocorrectionDisabled()
-                            .onSubmit {
-                                Task { await search() }
-                            }
-                        if !query.isEmpty {
-                            Button {
-                                query = ""
-                                items = []
-                            } label: {
-                                Image(systemName: "xmark.circle.fill")
-                                    .foregroundStyle(AtlassianTheme.mutedText)
+            if viewModel.isLoading {
+                loadingRow
+            } else if let errorMessage = viewModel.errorMessage {
+                EmptyStateView(icon: "exclamationmark.triangle", title: "搜索失败", message: errorMessage)
+                    .listRowBackground(AtlassianTheme.background)
+                    .listRowSeparator(.hidden)
+            } else if viewModel.items.isEmpty && (!contentQuery.isEmpty || !authorQuery.isEmpty) {
+                EmptyStateView(icon: "magnifyingglass", title: "暂无结果", message: "换个关键词试试")
+                    .listRowBackground(AtlassianTheme.background)
+                    .listRowSeparator(.hidden)
+            } else if viewModel.items.isEmpty {
+                EmptyStateView(icon: "text.magnifyingglass", title: "查找 Confluence 内容", message: "左侧搜作者，右侧搜标题或正文")
+                    .listRowBackground(AtlassianTheme.background)
+                    .listRowSeparator(.hidden)
+            } else {
+                Section {
+                    ForEach(viewModel.items) { item in
+                        NavigationLink {
+                            ContentDetailView(item: item)
+                                .id(item.id)
+                        } label: {
+                            ContentRow(item: item, highlightText: contentQuery, highlightAuthor: authorQuery)
+                        }
+                        .listRowBackground(AtlassianTheme.background)
+                        .onAppear {
+                            Task {
+                                await viewModel.loadMoreIfNeeded(currentItem: item, client: sessionStore.client)
                             }
                         }
                     }
-                    .font(appSettings.baseFont)
-                    .liquidField()
 
-                    Button {
-                        Task { await search() }
-                    } label: {
-                        Label("搜索", systemImage: "arrow.right")
+                    if viewModel.isLoadingMore {
+                        HStack {
+                            Spacer()
+                            ProgressView().tint(AtlassianTheme.blue)
+                            Spacer()
+                        }
+                        .listRowBackground(AtlassianTheme.background)
+                        .listRowSeparator(.hidden)
                     }
-                    .buttonStyle(PrimaryButtonStyle())
-                    .disabled(isLoading || query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                } header: {
+                    Text("结果")
+                        .font(.headline)
+                        .textCase(nil)
+                        .foregroundStyle(AtlassianTheme.mutedText)
                 }
-                .padding(.horizontal, 16)
-
-                searchResults
             }
-            .padding(.bottom, 28)
         }
-        .background(LiquidBackground())
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(AtlassianTheme.background)
+        .navigationTitle("搜索")
         .inlineNavigationTitle()
         .liquidNavigationChrome()
     }
 
-    @ViewBuilder
-    private var searchResults: some View {
-        if isLoading {
-            ProgressView()
-                .tint(AtlassianTheme.blue)
-                .frame(maxWidth: .infinity, minHeight: 180)
-                .padding(.horizontal, 16)
-        } else if let errorMessage {
-            EmptyStateView(icon: "exclamationmark.triangle", title: "搜索失败", message: errorMessage)
-                .padding(.horizontal, 16)
-        } else if items.isEmpty && !query.isEmpty {
-            EmptyStateView(icon: "magnifyingglass", title: "暂无结果", message: "换个关键词试试")
-                .padding(.horizontal, 16)
-        } else if items.isEmpty {
-            EmptyStateView(icon: "text.magnifyingglass", title: "查找 Confluence 内容", message: "输入标题、正文关键词或页面主题")
-                .padding(.horizontal, 16)
-        } else {
-            LazyVStack(spacing: 0) {
-                ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                    NavigationLink {
-                        ContentDetailView(item: item)
-                            .id(item.id)
-                    } label: {
-                        ContentRow(item: item, showsChevron: true)
-                    }
-                    .buttonStyle(.plain)
-
-                    if index < items.count - 1 {
-                        Divider()
-                            .padding(.leading, 72)
-                            .padding(.trailing, 12)
-                    }
-                }
+    private var searchFields: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 12) {
+                authorField
+                contentField
             }
-            .padding(8)
-            .liquidGlassPanel(cornerRadius: 30)
-            .padding(.horizontal, 16)
+            VStack(spacing: 12) {
+                authorField
+                contentField
+            }
+        }
+        .padding(.vertical, 8)
+    }
+
+    private var authorField: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("作者", systemImage: "person.crop.circle")
+                .font(appSettings.subheadlineFont)
+                .foregroundStyle(AtlassianTheme.mutedText)
+            TextField("作者 username", text: $authorQuery)
+                .textFieldStyle(.plain)
+                .autocorrectionDisabled()
+                .submitLabel(.search)
+                .onSubmit { runSearch() }
+                .liquidField()
         }
     }
 
-    private func search() async {
-        guard let client = sessionStore.client else { return }
-        isLoading = true
-        errorMessage = nil
-
-        do {
-            items = try await client.search(query)
-        } catch {
-            errorMessage = error.localizedDescription
+    private var contentField: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("内容", systemImage: "doc.text.magnifyingglass")
+                .font(appSettings.subheadlineFont)
+                .foregroundStyle(AtlassianTheme.mutedText)
+            HStack(spacing: 8) {
+                TextField("标题或正文关键词", text: $contentQuery)
+                    .textFieldStyle(.plain)
+                    .autocorrectionDisabled()
+                    .submitLabel(.search)
+                    .onSubmit { runSearch() }
+                Button {
+                    runSearch()
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                }
+                .disabled(contentQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && authorQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .liquidField()
         }
+    }
 
-        isLoading = false
+    private var loadingRow: some View {
+        ProgressView()
+            .tint(AtlassianTheme.blue)
+            .frame(maxWidth: .infinity, minHeight: 180)
+            .listRowBackground(AtlassianTheme.background)
+            .listRowSeparator(.hidden)
+    }
+
+    private func runSearch() {
+        Task {
+            await viewModel.search(client: sessionStore.client, content: contentQuery, author: authorQuery)
+        }
     }
 }
 
@@ -347,48 +503,35 @@ struct ContentRow: View {
     let item: ContentItem
     var isSelected = false
     var showsChevron = true
+    var highlightText: String?
+    var highlightAuthor: String?
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            IconBadge(systemName: iconName, tint: iconForeground)
+        HStack(alignment: .top, spacing: 14) {
+            AvatarView(name: item.authorName ?? item.spaceName, tint: avatarTint)
 
-            VStack(alignment: .leading, spacing: 7) {
-                Text(item.title)
-                    .font(appSettings.headlineFont)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(TextHighlighter.attributed(item.title, query: highlightText))
+                    .font(appSettings.fontChoice == .system ? .system(size: 18, weight: .semibold) : appSettings.fontChoice.font(size: 18 * appSettings.fontScale, relativeTo: .headline))
                     .foregroundStyle(AtlassianTheme.text)
-                    .lineLimit(3)
+                    .lineLimit(2)
                     .multilineTextAlignment(.leading)
 
-                HStack(spacing: 6) {
-                    TagView(text: item.typeLabel)
-                    if let spaceName = item.spaceName, !spaceName.isEmpty {
-                        Text(spaceName)
-                            .font(appSettings.fontChoice.font(size: 12 * appSettings.fontScale, relativeTo: .caption))
-                            .foregroundStyle(AtlassianTheme.mutedText)
-                        .lineLimit(1)
-                    }
-                }
-
-                HStack(spacing: 8) {
-                    if let authorName = item.authorName, !authorName.isEmpty {
-                        Label(authorName, systemImage: "person.crop.circle")
-                            .labelStyle(.titleAndIcon)
-                            .lineLimit(1)
-                    }
-
-                    if !item.activitySummary.isEmpty {
-                        Text(item.activitySummary)
-                            .lineLimit(1)
-                    }
-                }
-                .font(appSettings.fontChoice.font(size: 12 * appSettings.fontScale, relativeTo: .caption))
-                .foregroundStyle(AtlassianTheme.mutedText)
+                Text(TextHighlighter.attributed(subtitle, query: highlightAuthor))
+                    .font(appSettings.fontChoice.font(size: 15 * appSettings.fontScale, relativeTo: .subheadline))
+                    .foregroundStyle(AtlassianTheme.mutedText)
+                    .lineLimit(1)
 
                 if let excerpt = item.excerpt, !excerpt.isEmpty {
-                    Text(excerpt)
-                        .font(appSettings.fontChoice.font(size: 12 * appSettings.fontScale, relativeTo: .caption))
+                    Text(TextHighlighter.attributed(excerpt, query: highlightText))
+                        .font(appSettings.fontChoice.font(size: 14 * appSettings.fontScale, relativeTo: .caption))
                         .foregroundStyle(AtlassianTheme.mutedText)
                         .lineLimit(2)
+                } else if !item.activitySummary.isEmpty {
+                    Text(item.activitySummary)
+                        .font(appSettings.fontChoice.font(size: 14 * appSettings.fontScale, relativeTo: .caption))
+                        .foregroundStyle(AtlassianTheme.mutedText)
+                        .lineLimit(1)
                 }
             }
 
@@ -397,25 +540,29 @@ struct ContentRow: View {
             if showsChevron {
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(AtlassianTheme.mutedText.opacity(0.75))
-                    .padding(.top, 8)
+                    .foregroundStyle(AtlassianTheme.mutedText.opacity(0.65))
+                    .padding(.top, 7)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 12)
-        .background(isSelected ? AtlassianTheme.blue.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
+        .background(isSelected ? AtlassianTheme.blue.opacity(0.12) : Color.clear)
     }
 
-    private var iconName: String {
-        if item.origin == .popular {
-            return "flame.fill"
+    private var subtitle: String {
+        var pieces: [String] = []
+        if let spaceName = item.spaceName, !spaceName.isEmpty {
+            pieces.append(spaceName)
         }
-        return item.type.lowercased().contains("blog") ? "text.bubble.fill" : "doc.text.fill"
+        pieces.append(item.typeLabel)
+        if let authorName = item.authorName, !authorName.isEmpty {
+            pieces.append(authorName)
+        }
+        return pieces.joined(separator: " | ")
     }
 
-    private var iconForeground: Color {
-        item.origin == .popular ? Color(hex: 0xA15C00) : AtlassianTheme.blue
+    private var avatarTint: Color {
+        item.origin == .popular ? Color(hex: 0xA15C00) : AtlassianTheme.mutedText
     }
 }
 
@@ -431,5 +578,327 @@ struct TagView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .background(AtlassianTheme.blue.opacity(0.10), in: Capsule())
+    }
+}
+
+enum ContentGrouper {
+    static func group(items: [ContentItem]) -> [ContentDateSection] {
+        var today: [ContentItem] = []
+        var thisMonth: [ContentItem] = []
+        var older: [ContentItem] = []
+        var undated: [ContentItem] = []
+
+        let calendar = Calendar.current
+        let now = Date()
+        for item in items {
+            guard let date = item.date else {
+                undated.append(item)
+                continue
+            }
+            if calendar.isDateInToday(date) {
+                today.append(item)
+            } else if calendar.isDate(date, equalTo: now, toGranularity: .month) {
+                thisMonth.append(item)
+            } else {
+                older.append(item)
+            }
+        }
+
+        return [
+            ContentDateSection(id: "today", title: "Today", items: today),
+            ContentDateSection(id: "month", title: "This month", items: thisMonth),
+            ContentDateSection(id: "older", title: "More than a month ago", items: older),
+            ContentDateSection(id: "undated", title: "Earlier", items: undated)
+        ].filter { !$0.items.isEmpty }
+    }
+}
+
+@MainActor
+final class SpacesViewModel: ObservableObject {
+    @Published private(set) var spaces: [ConfluenceSpace] = []
+    @Published private(set) var isLoading = false
+    @Published private(set) var isLoadingMore = false
+    @Published private(set) var hasMore = true
+    @Published var errorMessage: String?
+
+    private let pageSize = 50
+    private var nextStart = 0
+
+    func load(client: ConfluenceClient?, force: Bool = false) async {
+        guard let client else { return }
+        guard force || (!isLoading && spaces.isEmpty) else { return }
+        isLoading = true
+        errorMessage = nil
+        nextStart = 0
+        hasMore = true
+
+        do {
+            let page = try await client.fetchSpaces(start: nextStart, limit: pageSize)
+            spaces = page
+            nextStart = page.count
+            hasMore = page.count >= pageSize
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+
+        isLoading = false
+    }
+
+    func loadMoreIfNeeded(space: ConfluenceSpace?, client: ConfluenceClient?) async {
+        guard let client, hasMore, !isLoading, !isLoadingMore else { return }
+        guard let space else {
+            await loadMore(client: client)
+            return
+        }
+        guard spaces.suffix(8).contains(where: { $0.key == space.key }) else { return }
+        await loadMore(client: client)
+    }
+
+    private func loadMore(client: ConfluenceClient) async {
+        isLoadingMore = true
+        defer { isLoadingMore = false }
+
+        do {
+            let page = try await client.fetchSpaces(start: nextStart, limit: pageSize)
+            let existingKeys = Set(spaces.map(\.key))
+            let newSpaces = page.filter { !existingKeys.contains($0.key) }
+            spaces.append(contentsOf: newSpaces)
+            nextStart += page.count
+            hasMore = page.count >= pageSize && !newSpaces.isEmpty
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+struct SpacesView: View {
+    @EnvironmentObject private var sessionStore: SessionStore
+    @StateObject private var viewModel = SpacesViewModel()
+
+    var body: some View {
+        List {
+            if viewModel.isLoading && viewModel.spaces.isEmpty {
+                ProgressView()
+                    .tint(AtlassianTheme.blue)
+                    .frame(maxWidth: .infinity, minHeight: 260)
+                    .listRowBackground(AtlassianTheme.background)
+                    .listRowSeparator(.hidden)
+            } else if let errorMessage = viewModel.errorMessage, viewModel.spaces.isEmpty {
+                EmptyStateView(icon: "folder.badge.questionmark", title: "空间加载失败", message: errorMessage)
+                    .listRowBackground(AtlassianTheme.background)
+                    .listRowSeparator(.hidden)
+            } else if viewModel.spaces.isEmpty {
+                EmptyStateView(icon: "folder", title: "暂无空间", message: "当前账号没有可见空间")
+                    .listRowBackground(AtlassianTheme.background)
+                    .listRowSeparator(.hidden)
+            } else {
+                Section {
+                    ForEach(viewModel.spaces, id: \.key) { space in
+                        NavigationLink {
+                            SpaceContentView(space: space)
+                        } label: {
+                            SpaceRow(space: space)
+                        }
+                        .listRowBackground(AtlassianTheme.background)
+                        .onAppear {
+                            Task {
+                                await viewModel.loadMoreIfNeeded(space: space, client: sessionStore.client)
+                            }
+                        }
+                    }
+
+                    if viewModel.isLoadingMore {
+                        HStack {
+                            Spacer()
+                            ProgressView().tint(AtlassianTheme.blue)
+                            Spacer()
+                        }
+                        .listRowBackground(AtlassianTheme.background)
+                        .listRowSeparator(.hidden)
+                    }
+                } header: {
+                    Text("Spaces")
+                        .font(.system(size: 21, weight: .semibold))
+                        .textCase(nil)
+                        .foregroundStyle(AtlassianTheme.mutedText)
+                        .padding(.top, 16)
+                }
+            }
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(AtlassianTheme.background)
+        .navigationTitle("Spaces")
+        .inlineNavigationTitle()
+        .liquidNavigationChrome()
+        .refreshable {
+            await viewModel.load(client: sessionStore.client, force: true)
+        }
+        .task {
+            await viewModel.load(client: sessionStore.client)
+        }
+    }
+}
+
+struct SpaceRow: View {
+    @EnvironmentObject private var appSettings: AppSettings
+
+    let space: ConfluenceSpace
+
+    var body: some View {
+        HStack(spacing: 14) {
+            AvatarView(name: space.key, tint: AtlassianTheme.blue)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(space.name)
+                    .font(appSettings.fontChoice == .system ? .system(size: 18, weight: .semibold) : appSettings.fontChoice.font(size: 18 * appSettings.fontScale, relativeTo: .headline))
+                    .foregroundStyle(AtlassianTheme.text)
+                    .lineLimit(2)
+                Text(space.key)
+                    .font(appSettings.subheadlineFont)
+                    .foregroundStyle(AtlassianTheme.mutedText)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.vertical, 8)
+    }
+}
+
+@MainActor
+final class SpaceContentViewModel: ObservableObject {
+    let space: ConfluenceSpace
+
+    @Published private(set) var items: [ContentItem] = []
+    @Published private(set) var isLoading = false
+    @Published private(set) var isLoadingMore = false
+    @Published private(set) var hasMore = true
+    @Published var errorMessage: String?
+
+    private let pageSize = 30
+    private var nextStart = 0
+
+    init(space: ConfluenceSpace) {
+        self.space = space
+    }
+
+    func load(client: ConfluenceClient?, force: Bool = false) async {
+        guard let client else { return }
+        guard force || (!isLoading && items.isEmpty) else { return }
+        isLoading = true
+        errorMessage = nil
+        nextStart = 0
+        hasMore = true
+
+        do {
+            let page = try await client.fetchSpaceContent(spaceKey: space.key, start: nextStart, limit: pageSize)
+            items = page
+            nextStart = page.count
+            hasMore = page.count >= pageSize
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+
+        isLoading = false
+    }
+
+    func loadMoreIfNeeded(currentItem item: ContentItem?, client: ConfluenceClient?) async {
+        guard let client, hasMore, !isLoading, !isLoadingMore else { return }
+        guard let item else {
+            await loadMore(client: client)
+            return
+        }
+        guard items.suffix(6).contains(where: { $0.id == item.id }) else { return }
+        await loadMore(client: client)
+    }
+
+    private func loadMore(client: ConfluenceClient) async {
+        isLoadingMore = true
+        defer { isLoadingMore = false }
+
+        do {
+            let page = try await client.fetchSpaceContent(spaceKey: space.key, start: nextStart, limit: pageSize)
+            let existingIDs = Set(items.map(\.id))
+            let newItems = page.filter { !existingIDs.contains($0.id) }
+            items.append(contentsOf: newItems)
+            nextStart += page.count
+            hasMore = page.count >= pageSize && !newItems.isEmpty
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+struct SpaceContentView: View {
+    @EnvironmentObject private var sessionStore: SessionStore
+    @StateObject private var viewModel: SpaceContentViewModel
+
+    init(space: ConfluenceSpace) {
+        _viewModel = StateObject(wrappedValue: SpaceContentViewModel(space: space))
+    }
+
+    var body: some View {
+        List {
+            if viewModel.isLoading && viewModel.items.isEmpty {
+                ProgressView()
+                    .tint(AtlassianTheme.blue)
+                    .frame(maxWidth: .infinity, minHeight: 260)
+                    .listRowBackground(AtlassianTheme.background)
+                    .listRowSeparator(.hidden)
+            } else if let errorMessage = viewModel.errorMessage, viewModel.items.isEmpty {
+                EmptyStateView(icon: "doc.text.magnifyingglass", title: "内容加载失败", message: errorMessage)
+                    .listRowBackground(AtlassianTheme.background)
+                    .listRowSeparator(.hidden)
+            } else if viewModel.items.isEmpty {
+                EmptyStateView(icon: "doc", title: "暂无内容", message: "这个空间里还没有可见页面或博客")
+                    .listRowBackground(AtlassianTheme.background)
+                    .listRowSeparator(.hidden)
+            } else {
+                ForEach(ContentGrouper.group(items: viewModel.items)) { section in
+                    Section {
+                        ForEach(section.items) { item in
+                            NavigationLink {
+                                ContentDetailView(item: item)
+                                    .id(item.id)
+                            } label: {
+                                ContentRow(item: item)
+                            }
+                            .listRowBackground(AtlassianTheme.background)
+                            .onAppear {
+                                Task {
+                                    await viewModel.loadMoreIfNeeded(currentItem: item, client: sessionStore.client)
+                                }
+                            }
+                        }
+                    } header: {
+                        Text(section.title)
+                            .font(.system(size: 21, weight: .semibold))
+                            .textCase(nil)
+                            .foregroundStyle(AtlassianTheme.mutedText)
+                            .padding(.top, 16)
+                    }
+                }
+
+                if viewModel.isLoadingMore {
+                    HStack {
+                        Spacer()
+                        ProgressView().tint(AtlassianTheme.blue)
+                        Spacer()
+                    }
+                    .listRowBackground(AtlassianTheme.background)
+                    .listRowSeparator(.hidden)
+                }
+            }
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(AtlassianTheme.background)
+        .navigationTitle(viewModel.space.name)
+        .inlineNavigationTitle()
+        .liquidNavigationChrome()
+        .refreshable {
+            await viewModel.load(client: sessionStore.client, force: true)
+        }
+        .task {
+            await viewModel.load(client: sessionStore.client)
+        }
     }
 }
