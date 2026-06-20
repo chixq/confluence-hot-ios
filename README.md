@@ -57,3 +57,14 @@ IPA 只有在你要发给别人安装、走 TestFlight、Ad Hoc，或用 AltStor
 3. 点 `Run workflow`，或 push 到 `main` 自动触发。
 4. 构建完成后，在页面底部下载 `ConfluenceHot-unsigned-ipa` artifact。
 5. 用 AltStore/SideStore 导入 `ConfluenceHot-unsigned.ipa` 后安装到 iPhone。
+
+## 发布 Release
+
+Release 推荐用 tag 触发。推送 `v*` tag 后，GitHub Actions 会自动构建 unsigned IPA，并创建或更新对应的 GitHub Release：
+
+```bash
+git tag v1.0.2
+git push origin v1.0.2
+```
+
+如果只 push 到 `main`，Actions 只生成临时 artifact，不会自动生成 Release。

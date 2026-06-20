@@ -4,4 +4,5 @@ DerivedData/
 build/
 *.xcuserstate
 *.ipa
+*.ipa.sha256
 *.dSYM.zip
