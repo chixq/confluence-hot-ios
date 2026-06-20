@@ -71,7 +71,6 @@ final class ContentFeedViewModel: ObservableObject {
 struct AdaptiveFeedView: View {
     @EnvironmentObject private var appSettings: AppSettings
     @EnvironmentObject private var sessionStore: SessionStore
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     let kind: FeedKind
     @StateObject private var viewModel: ContentFeedViewModel
@@ -83,27 +82,53 @@ struct AdaptiveFeedView: View {
     }
 
     var body: some View {
-        if appSettings.landscapeSplitEnabled && horizontalSizeClass == .regular {
-            NavigationSplitView {
-                FeedListView(viewModel: viewModel, selectedItem: $selectedItem, compactNavigation: false)
-                    .navigationTitle(kind.title)
-            } detail: {
-                if let selectedItem {
-                    ContentDetailView(item: selectedItem)
+        GeometryReader { proxy in
+            let isLandscape = proxy.size.width > proxy.size.height && proxy.size.width >= 700
+            let shouldUseSplit = appSettings.landscapeSplitEnabled && isLandscape
+
+            Group {
+                if shouldUseSplit {
+                    NavigationSplitView {
+                        FeedListView(viewModel: viewModel, selectedItem: $selectedItem, compactNavigation: false)
+                            .navigationTitle(kind.title)
+                            .liquidNavigationChrome()
+                    } detail: {
+                        if let selectedItem {
+                            ContentDetailView(item: selectedItem)
+                                .id(selectedItem.id)
+                        } else {
+                            EmptyStateView(icon: "rectangle.split.2x1", title: "选择一篇内容", message: "横屏时可在左侧浏览列表，右侧阅读正文和回复")
+                                .padding(24)
+                        }
+                    }
+                    .task {
+                        await viewModel.load(client: sessionStore.client)
+                        reconcileSelection()
+                    }
+                    .onReceive(viewModel.$items) { _ in
+                        reconcileSelection()
+                    }
                 } else {
-                    EmptyStateView(icon: "rectangle.split.2x1", title: "选择一篇内容", message: "横屏时可在左侧浏览列表，右侧阅读正文和回复")
+                    NavigationStack {
+                        FeedListView(viewModel: viewModel, selectedItem: $selectedItem, compactNavigation: true)
+                            .navigationTitle(kind.title)
+                            .liquidNavigationChrome()
+                    }
                 }
             }
-            .task {
-                await viewModel.load(client: sessionStore.client)
-                selectedItem = selectedItem ?? viewModel.items.first
-            }
-        } else {
-            NavigationStack {
-                FeedListView(viewModel: viewModel, selectedItem: $selectedItem, compactNavigation: true)
-                    .navigationTitle(kind.title)
-            }
+            .animation(.spring(response: 0.35, dampingFraction: 0.86), value: shouldUseSplit)
         }
+    }
+
+    private func reconcileSelection() {
+        guard !viewModel.items.isEmpty else {
+            selectedItem = nil
+            return
+        }
+        if let selectedItem, viewModel.items.contains(where: { $0.id == selectedItem.id }) {
+            return
+        }
+        selectedItem = viewModel.items.first
     }
 }
 
@@ -147,8 +172,9 @@ struct FeedListView: View {
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
-        .background(AtlassianTheme.background)
+        .background(LiquidBackground())
         .inlineNavigationTitle()
+        .liquidNavigationChrome()
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -172,6 +198,7 @@ struct FeedListView: View {
         if compactNavigation {
             NavigationLink {
                 ContentDetailView(item: item)
+                    .id(item.id)
             } label: {
                 ContentRow(item: item, isSelected: false)
             }
@@ -218,8 +245,7 @@ struct SearchView: View {
                     }
                 }
                 .padding(12)
-                .background(AtlassianTheme.surface)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .liquidGlassPanel(cornerRadius: 22)
 
                 Button {
                     Task { await search() }
@@ -242,6 +268,7 @@ struct SearchView: View {
                     ForEach(items) { item in
                         NavigationLink {
                             ContentDetailView(item: item)
+                                .id(item.id)
                         } label: {
                             ContentRow(item: item)
                         }
@@ -253,8 +280,9 @@ struct SearchView: View {
             .padding(.top, 16)
             .padding(.bottom, 28)
         }
-        .background(AtlassianTheme.background)
+        .background(LiquidBackground())
         .inlineNavigationTitle()
+        .liquidNavigationChrome()
     }
 
     private func search() async {
@@ -329,12 +357,7 @@ struct ContentRow: View {
                 .padding(.top, 5)
         }
         .padding(14)
-        .background(isSelected ? AtlassianTheme.blue.opacity(0.10) : AtlassianTheme.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(AtlassianTheme.border, lineWidth: 0.5)
-        )
+        .liquidGlassPanel(cornerRadius: 24, isSelected: isSelected)
     }
 
     private var iconBackground: Color {
@@ -357,7 +380,7 @@ struct TagView: View {
             .foregroundStyle(AtlassianTheme.blue)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
-            .background(AtlassianTheme.blue.opacity(0.10))
-            .clipShape(Capsule())
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(Capsule().stroke(Color.white.opacity(0.32), lineWidth: 0.7))
     }
 }

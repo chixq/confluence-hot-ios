@@ -49,7 +49,8 @@ struct ContentDetailView: View {
                         contentHeight: $webContentHeight
                     )
                         .frame(height: webContentHeight)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                        .liquidGlassPanel(cornerRadius: 24)
                         .padding(.horizontal, 16)
                 }
 
@@ -66,8 +67,9 @@ struct ContentDetailView: View {
             }
             .padding(.bottom, 28)
         }
-        .background(AtlassianTheme.background)
+        .background(LiquidBackground())
         .inlineNavigationTitle()
+        .liquidNavigationChrome()
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 if let baseURL = sessionStore.configuration?.baseURL,
@@ -80,9 +82,19 @@ struct ContentDetailView: View {
                 }
             }
         }
-        .task {
+        .task(id: item.id) {
+            resetForCurrentItem()
             await load()
         }
+    }
+
+    private func resetForCurrentItem() {
+        detail = nil
+        comments = []
+        errorMessage = nil
+        commentsErrorMessage = nil
+        replyText = ""
+        webContentHeight = 560
     }
 
     private func load() async {
@@ -263,8 +275,7 @@ struct CommentSectionView: View {
                     .foregroundStyle(AtlassianTheme.mutedText)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(14)
-                    .background(AtlassianTheme.surface)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .liquidGlassPanel(cornerRadius: 22)
             } else {
                 ForEach(comments) { comment in
                     CommentRow(comment: comment)
@@ -281,11 +292,10 @@ struct CommentSectionView: View {
                     .frame(minHeight: 96)
                     .scrollContentBackground(.hidden)
                     .padding(8)
-                    .background(AtlassianTheme.secondarySurface)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(AtlassianTheme.border, lineWidth: 1)
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(Color.white.opacity(0.34), lineWidth: 1)
                     )
 
                 Button {
@@ -302,12 +312,7 @@ struct CommentSectionView: View {
                 .disabled(isPosting || replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .padding(14)
-            .background(AtlassianTheme.surface)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(AtlassianTheme.border, lineWidth: 0.5)
-            )
+            .liquidGlassPanel(cornerRadius: 24)
         }
     }
 }
@@ -339,12 +344,7 @@ struct CommentRow: View {
             .frame(height: contentHeight)
         }
         .padding(14)
-        .background(AtlassianTheme.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(AtlassianTheme.border, lineWidth: 0.5)
-        )
+        .liquidGlassPanel(cornerRadius: 24)
     }
 
     private func commentHTML(_ body: String) -> String {

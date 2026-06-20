@@ -79,8 +79,11 @@ struct LoginView: View {
                 }
                 .padding(24)
                 .frame(maxWidth: 520, alignment: .leading)
+                .liquidGlassPanel(cornerRadius: 30)
+                .padding(20)
             }
-            .background(AtlassianTheme.background)
+            .background(LiquidBackground())
+            .liquidNavigationChrome()
             .onAppear {
                 if let configuration = sessionStore.configuration {
                     baseURL = configuration.baseURL.absoluteString
@@ -119,5 +122,6 @@ struct MainTabView: View {
             }
         }
         .tint(AtlassianTheme.blue)
+        .liquidTabBarChrome()
     }
 }

@@ -120,8 +120,9 @@ struct SettingsView: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 28)
         }
-        .background(AtlassianTheme.background)
+        .background(LiquidBackground())
         .inlineNavigationTitle()
+        .liquidNavigationChrome()
         .onAppear {
             if let configuration = sessionStore.configuration {
                 baseURL = configuration.baseURL.absoluteString
@@ -138,12 +139,7 @@ struct SettingsView: View {
             content()
         }
         .padding(16)
-        .background(AtlassianTheme.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(AtlassianTheme.border, lineWidth: 0.5)
-        )
+        .liquidGlassPanel(cornerRadius: 26)
     }
 
     private func save() async {

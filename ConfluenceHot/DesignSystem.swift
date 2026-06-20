@@ -3,7 +3,7 @@ import SwiftUI
 enum AtlassianTheme {
     static let blue = Color(hex: 0x0052CC)
     static let bluePressed = Color(hex: 0x0747A6)
-    static let background = Color.dynamic(light: 0xF4F5F7, dark: 0x0F1117)
+    static let background = Color.dynamic(light: 0xEEF3FA, dark: 0x0B0F17)
     static let surface = Color.dynamic(light: 0xFFFFFF, dark: 0x1B1F29)
     static let secondarySurface = Color.dynamic(light: 0xFAFBFC, dark: 0x242936)
     static let text = Color.dynamic(light: 0x172B4D, dark: 0xF4F5F7)
@@ -56,8 +56,23 @@ struct PrimaryButtonStyle: ButtonStyle {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 14)
             .foregroundStyle(Color.white)
-            .background(configuration.isPressed ? AtlassianTheme.bluePressed : AtlassianTheme.blue)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(
+                LinearGradient(
+                    colors: [
+                        configuration.isPressed ? AtlassianTheme.bluePressed : AtlassianTheme.blue,
+                        Color(hex: 0x2684FF)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                in: Capsule()
+            )
+            .overlay(
+                Capsule()
+                    .stroke(Color.white.opacity(0.34), lineWidth: 1)
+            )
+            .shadow(color: AtlassianTheme.blue.opacity(configuration.isPressed ? 0.12 : 0.28), radius: 18, x: 0, y: 8)
+            .scaleEffect(configuration.isPressed ? 0.985 : 1)
     }
 }
 
@@ -68,12 +83,69 @@ struct SecondaryButtonStyle: ButtonStyle {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 13)
             .foregroundStyle(configuration.isPressed ? AtlassianTheme.bluePressed : AtlassianTheme.blue)
-            .background(AtlassianTheme.surface)
+            .background(.ultraThinMaterial, in: Capsule())
             .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(AtlassianTheme.border, lineWidth: 1)
+                Capsule()
+                    .stroke(Color.white.opacity(0.34), lineWidth: 1)
             )
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .shadow(color: Color.black.opacity(0.08), radius: 14, x: 0, y: 8)
+            .scaleEffect(configuration.isPressed ? 0.985 : 1)
+    }
+}
+
+struct LiquidBackground: View {
+    var body: some View {
+        ZStack {
+            AtlassianTheme.background
+            LinearGradient(
+                colors: [
+                    Color.white.opacity(0.32),
+                    AtlassianTheme.blue.opacity(0.08),
+                    Color.clear
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        }
+        .ignoresSafeArea()
+    }
+}
+
+private struct LiquidGlassPanelModifier: ViewModifier {
+    var cornerRadius: CGFloat = 26
+    var isSelected = false
+    var padding: CGFloat = 0
+
+    func body(content: Content) -> some View {
+        content
+            .padding(padding)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .background(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(isSelected ? AtlassianTheme.blue.opacity(0.14) : Color.white.opacity(0.10))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .stroke(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.58),
+                                AtlassianTheme.border.opacity(0.52),
+                                Color.white.opacity(0.20)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: isSelected ? 1.2 : 0.8
+                    )
+            )
+            .shadow(color: Color.black.opacity(0.10), radius: 18, x: 0, y: 10)
+    }
+}
+
+extension View {
+    func liquidGlassPanel(cornerRadius: CGFloat = 26, isSelected: Bool = false, padding: CGFloat = 0) -> some View {
+        modifier(LiquidGlassPanelModifier(cornerRadius: cornerRadius, isSelected: isSelected, padding: padding))
     }
 }
 
@@ -124,6 +196,7 @@ struct EmptyStateView: View {
         }
         .frame(maxWidth: .infinity, minHeight: 260)
         .padding(24)
+        .liquidGlassPanel(cornerRadius: 28)
     }
 }
 
@@ -132,6 +205,28 @@ extension View {
     func inlineNavigationTitle() -> some View {
         #if os(iOS)
         self.navigationBarTitleDisplayMode(.inline)
+        #else
+        self
+        #endif
+    }
+
+    @ViewBuilder
+    func liquidNavigationChrome() -> some View {
+        #if os(iOS)
+        self
+            .toolbarBackground(.visible, for: .navigationBar)
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
+        #else
+        self
+        #endif
+    }
+
+    @ViewBuilder
+    func liquidTabBarChrome() -> some View {
+        #if os(iOS)
+        self
+            .toolbarBackground(.visible, for: .tabBar)
+            .toolbarBackground(.ultraThinMaterial, for: .tabBar)
         #else
         self
         #endif
