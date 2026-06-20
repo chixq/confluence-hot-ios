@@ -508,7 +508,7 @@ struct ContentRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
-            AvatarView(name: item.authorName ?? item.spaceName, tint: avatarTint)
+            AuthenticatedAvatarView(name: item.authorName ?? item.spaceName, path: item.authorAvatarPath, tint: avatarTint)
 
             VStack(alignment: .leading, spacing: 5) {
                 Text(TextHighlighter.attributed(item.title, query: highlightText))

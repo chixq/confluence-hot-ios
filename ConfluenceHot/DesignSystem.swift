@@ -1,4 +1,9 @@
 import SwiftUI
+#if os(iOS)
+import UIKit
+#else
+import AppKit
+#endif
 
 enum AtlassianTheme {
     static let blue = Color(hex: 0x0C66E4)
@@ -222,6 +227,7 @@ struct CapsuleMetric: View {
 struct AvatarView: View {
     let name: String?
     var tint: Color = AtlassianTheme.mutedText
+    var size: CGFloat = 44
 
     var body: some View {
         ZStack {
@@ -231,7 +237,7 @@ struct AvatarView: View {
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(tint)
         }
-        .frame(width: 44, height: 44)
+        .frame(width: size, height: size)
     }
 
     private var initials: String {
@@ -243,6 +249,77 @@ struct AvatarView: View {
         return "?"
     }
 }
+
+struct AuthenticatedAvatarView: View {
+    @EnvironmentObject private var sessionStore: SessionStore
+
+    let name: String?
+    let path: String?
+    var tint: Color = AtlassianTheme.mutedText
+    var size: CGFloat = 44
+
+    @State private var image: PlatformImage?
+    @State private var loadedPath: String?
+
+    var body: some View {
+        Group {
+            if let image {
+                platformImage(image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: size, height: size)
+                    .clipShape(Circle())
+            } else {
+                AvatarView(name: name, tint: tint, size: size)
+            }
+        }
+        .task(id: path ?? "") {
+            await load()
+        }
+    }
+
+    private func load() async {
+        guard loadedPath != path else { return }
+        loadedPath = path
+        image = nil
+        guard let path, !path.isEmpty,
+              let client = sessionStore.client,
+              let url = resolve(path: path, baseURL: client.baseURL) else { return }
+
+        do {
+            let payload = try await client.fetchData(url: url)
+            #if os(iOS)
+            image = UIImage(data: payload.data)
+            #else
+            image = NSImage(data: payload.data)
+            #endif
+        } catch {
+            image = nil
+        }
+    }
+
+    private func resolve(path: String, baseURL: URL) -> URL? {
+        if let absolute = URL(string: path), absolute.scheme != nil {
+            return absolute
+        }
+        return URL(string: path, relativeTo: baseURL)?.absoluteURL
+    }
+
+    @ViewBuilder
+    private func platformImage(_ image: PlatformImage) -> Image {
+        #if os(iOS)
+        Image(uiImage: image)
+        #else
+        Image(nsImage: image)
+        #endif
+    }
+}
+
+#if os(iOS)
+typealias PlatformImage = UIImage
+#else
+typealias PlatformImage = NSImage
+#endif
 
 enum TextHighlighter {
     static func attributed(_ text: String, query: String?) -> AttributedString {

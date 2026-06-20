@@ -93,12 +93,14 @@ struct ContentItem: Identifiable, Equatable {
     let type: String
     let spaceName: String?
     let authorName: String?
+    let authorAvatarPath: String?
     let dateText: String?
     let date: Date?
     let webPath: String?
     let likeCount: Int?
     let commentCount: Int?
     let excerpt: String?
+    let searchableText: String?
     let origin: Origin
 
     var typeLabel: String {
@@ -172,6 +174,7 @@ struct ContentSearchResult: Decodable {
         let created = history?.createdBy
         let dateString = update?.friendlyWhen ?? update?.when ?? history?.createdDate
         let parsedDate = DateParser.parse(update?.when ?? history?.createdDate)
+        let fullText = body?.view?.value.strippedHTMLText()
 
         return ContentItem(
             id: id,
@@ -179,12 +182,14 @@ struct ContentSearchResult: Decodable {
             type: type,
             spaceName: space?.name,
             authorName: update?.by?.displayName ?? created?.displayName,
+            authorAvatarPath: update?.by?.profilePicture?.path ?? created?.profilePicture?.path,
             dateText: DateParser.displayText(from: dateString, date: parsedDate),
             date: parsedDate,
             webPath: links?.webUI ?? links?.tinyUI,
             likeCount: nil,
             commentCount: nil,
-            excerpt: body?.view?.value.strippedHTMLExcerpt(maxLength: 120),
+            excerpt: fullText?.limited(to: 160),
+            searchableText: fullText,
             origin: origin
         )
     }
@@ -272,12 +277,14 @@ struct PopularStreamItem: Decodable {
             type: contentType,
             spaceName: nil,
             authorName: author?.fullName ?? author?.userName,
+            authorAvatarPath: author?.avatarUrl,
             dateText: DateParser.displayText(from: friendlyDate ?? date, date: parsedDate),
             date: parsedDate,
             webPath: url,
             likeCount: numberOfLikes,
             commentCount: numberOfComments,
             excerpt: nil,
+            searchableText: nil,
             origin: .popular
         )
     }
@@ -310,6 +317,14 @@ struct ContentDetail: Decodable {
 
     var renderedHTML: String {
         body?.view?.value ?? "<p></p>"
+    }
+
+    var storageHTML: String? {
+        body?.storage?.value
+    }
+
+    var nextVersionNumber: Int {
+        (version?.number ?? 1) + 1
     }
 }
 
@@ -355,6 +370,7 @@ struct CommentResult: Decodable {
         return CommentItem(
             id: id,
             authorName: update?.by?.displayName ?? created?.displayName ?? "匿名用户",
+            authorAvatarPath: update?.by?.profilePicture?.path ?? created?.profilePicture?.path,
             dateText: DateParser.displayText(from: dateString, date: parsedDate),
             html: body?.view?.value ?? body?.storage?.value ?? "",
             webPath: links?.webUI ?? links?.tinyUI
@@ -365,6 +381,7 @@ struct CommentResult: Decodable {
 struct CommentItem: Identifiable, Equatable {
     let id: String
     let authorName: String
+    let authorAvatarPath: String?
     let dateText: String?
     let html: String
     let webPath: String?
@@ -505,7 +522,7 @@ private extension String {
         return value
     }
 
-    func strippedHTMLExcerpt(maxLength: Int) -> String {
+    func strippedHTMLText() -> String {
         let withoutTags = replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
         let decoded = withoutTags
             .replacingOccurrences(of: "&nbsp;", with: " ")
@@ -517,7 +534,11 @@ private extension String {
             .components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty }
             .joined(separator: " ")
-        guard collapsed.count > maxLength else { return collapsed }
-        return String(collapsed.prefix(maxLength)) + "..."
+        return collapsed
+    }
+
+    func limited(to maxLength: Int) -> String {
+        guard count > maxLength else { return self }
+        return String(prefix(maxLength)) + "..."
     }
 }

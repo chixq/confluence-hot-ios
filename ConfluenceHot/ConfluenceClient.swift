@@ -92,34 +92,26 @@ final class ConfluenceClient {
             return try await fetchRecentlyUpdated(start: start, limit: limit)
         }
 
+        if !cleanedAuthor.isEmpty {
+            return try await searchContentWithAuthorFilter(contentQuery: cleaned, authorQuery: cleanedAuthor, start: start, limit: limit)
+        }
+
         var filters = ["type in (page,blogpost)"]
         if !cleaned.isEmpty {
             let escaped = Self.escapeCQL(cleaned)
             filters.append("(title ~ \"\(escaped)\" or text ~ \"\(escaped)\")")
         }
-        if !cleanedAuthor.isEmpty {
-            let escapedAuthor = Self.escapeCQL(cleanedAuthor)
-            filters.append("(creator = \"\(escapedAuthor)\" or contributor = \"\(escapedAuthor)\")")
-        }
 
         let cql = "\(filters.joined(separator: " and ")) order by lastmodified desc"
-        let response: ContentSearchResponse = try await request(
-            "/rest/api/content/search",
-            queryItems: [
-                URLQueryItem(name: "cql", value: cql),
-                URLQueryItem(name: "start", value: String(start)),
-                URLQueryItem(name: "limit", value: String(limit)),
-                URLQueryItem(name: "expand", value: "space,history.lastUpdated,body.view")
-            ]
-        )
-        return response.results.map { $0.item(origin: .search) }
+        return try await fetchSearchItems(cql: cql, start: start, limit: limit)
+            .filter { Self.matchesContent($0, query: cleaned) }
     }
 
     func fetchDetail(id: String) async throws -> ContentDetail {
         try await request(
             "/rest/api/content/\(id)",
             queryItems: [
-                URLQueryItem(name: "expand", value: "body.view,space,version")
+                URLQueryItem(name: "expand", value: "body.view,body.storage,space,version")
             ]
         )
     }
@@ -154,6 +146,97 @@ final class ConfluenceClient {
             body: requestBody
         )
         return result.item()
+    }
+
+    func updateContent(id: String, type: String, title: String, storageHTML: String, versionNumber: Int) async throws -> ContentDetail {
+        let body = UpdateContentRequest(
+            id: id,
+            type: type,
+            title: title,
+            version: ContentVersionRequest(number: versionNumber),
+            body: StorageBody(storage: StorageRepresentation(value: storageHTML, representation: "storage"))
+        )
+        return try await request(
+            "/rest/api/content/\(id)",
+            method: "PUT",
+            queryItems: [URLQueryItem(name: "expand", value: "body.view,body.storage,space,version")],
+            body: body
+        )
+    }
+
+    func copyContent(detail: ContentDetail) async throws -> ContentDetail {
+        guard let storageHTML = detail.storageHTML else {
+            throw ConfluenceClientError.missingStorageBody
+        }
+        guard let spaceKey = detail.space?.key else {
+            throw ConfluenceClientError.missingSpace
+        }
+        let body = CreateContentRequest(
+            type: detail.type,
+            title: "\(detail.title) 副本",
+            space: SpaceKeyRequest(key: spaceKey),
+            body: StorageBody(storage: StorageRepresentation(value: storageHTML, representation: "storage"))
+        )
+        return try await request(
+            "/rest/api/content",
+            method: "POST",
+            queryItems: [URLQueryItem(name: "expand", value: "body.view,body.storage,space,version")],
+            body: body
+        )
+    }
+
+    func deleteContent(id: String) async throws {
+        try await requestVoid("/rest/api/content/\(id)", method: "DELETE")
+    }
+
+    func fetchData(url: URL) async throws -> (data: Data, mimeType: String) {
+        var request = URLRequest(url: url)
+        request.setValue("ConfluenceHot-iOS", forHTTPHeaderField: "User-Agent")
+        request.setValue(basicAuthHeader(), forHTTPHeaderField: "Authorization")
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw ConfluenceClientError.invalidResponse
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw ConfluenceClientError.httpStatus(httpResponse.statusCode, nil)
+        }
+        let mimeType = httpResponse.value(forHTTPHeaderField: "Content-Type")?.components(separatedBy: ";").first ?? Self.mimeType(for: url)
+        return (data, mimeType)
+    }
+
+    func inlineAuthenticatedImages(in html: String, baseURL: URL?) async -> String {
+        guard let baseURL else { return html }
+        let pattern = #"<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return html }
+        let nsRange = NSRange(html.startIndex..<html.endIndex, in: html)
+        let matches = regex.matches(in: html, options: [], range: nsRange)
+        guard !matches.isEmpty else { return html }
+
+        var replacements: [String: String] = [:]
+        for match in matches {
+            guard match.numberOfRanges > 1,
+                  let range = Range(match.range(at: 1), in: html) else { continue }
+            let rawSource = String(html[range])
+            guard replacements[rawSource] == nil,
+                  !rawSource.lowercased().hasPrefix("data:"),
+                  let resolved = resolvedURL(from: rawSource, baseURL: baseURL),
+                  resolved.host == baseURL.host else { continue }
+
+            do {
+                let payload = try await fetchData(url: resolved)
+                let encoded = payload.data.base64EncodedString()
+                replacements[rawSource] = "data:\(payload.mimeType);base64,\(encoded)"
+            } catch {
+                continue
+            }
+        }
+
+        var output = html
+        for (source, replacement) in replacements {
+            output = output.replacingOccurrences(of: source, with: replacement)
+            output = output.replacingOccurrences(of: source.htmlAttributeEscaped(), with: replacement)
+        }
+        return output
     }
 
     func fetchAdminSystemInfo() async throws -> AdminSystemInfo {
@@ -214,6 +297,71 @@ final class ConfluenceClient {
 
     private func request<T: Decodable>(_ path: String, queryItems: [URLQueryItem] = []) async throws -> T {
         try await request(path, method: "GET", queryItems: queryItems, body: Optional<EmptyBody>.none)
+    }
+
+    private func requestVoid(_ path: String, method: String) async throws {
+        let url = try makeURL(path: path, queryItems: [])
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("ConfluenceHot-iOS", forHTTPHeaderField: "User-Agent")
+        request.setValue(basicAuthHeader(), forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw ConfluenceClientError.invalidResponse
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            let message = String(data: data, encoding: .utf8)
+            throw ConfluenceClientError.httpStatus(httpResponse.statusCode, message)
+        }
+    }
+
+    private func fetchSearchItems(cql: String, start: Int, limit: Int) async throws -> [ContentItem] {
+        let response: ContentSearchResponse = try await request(
+            "/rest/api/content/search",
+            queryItems: [
+                URLQueryItem(name: "cql", value: cql),
+                URLQueryItem(name: "start", value: String(start)),
+                URLQueryItem(name: "limit", value: String(limit)),
+                URLQueryItem(name: "expand", value: "space,history.createdBy,history.lastUpdated,body.view")
+            ]
+        )
+        return response.results.map { $0.item(origin: .search) }
+    }
+
+    private func searchContentWithAuthorFilter(contentQuery: String, authorQuery: String, start: Int, limit: Int) async throws -> [ContentItem] {
+        var filters = ["type in (page,blogpost)"]
+        if !contentQuery.isEmpty {
+            let escaped = Self.escapeCQL(contentQuery)
+            filters.append("(title ~ \"\(escaped)\" or text ~ \"\(escaped)\")")
+        }
+        let cql = "\(filters.joined(separator: " and ")) order by lastmodified desc"
+
+        var rawStart = 0
+        var skippedMatches = 0
+        var output: [ContentItem] = []
+        let rawPageSize = 80
+        let maxScanned = 800
+
+        while output.count < limit && rawStart < maxScanned {
+            let page = try await fetchSearchItems(cql: cql, start: rawStart, limit: rawPageSize)
+            if page.isEmpty { break }
+            for item in page {
+                guard Self.matchesAuthor(item, query: authorQuery),
+                      Self.matchesContent(item, query: contentQuery) else { continue }
+                if skippedMatches < start {
+                    skippedMatches += 1
+                } else {
+                    output.append(item)
+                    if output.count >= limit { break }
+                }
+            }
+            if page.count < rawPageSize { break }
+            rawStart += rawPageSize
+        }
+
+        return output
     }
 
     private func fetchUserCount() async -> Int? {
@@ -289,6 +437,45 @@ final class ConfluenceClient {
             .replacingOccurrences(of: "\"", with: "\\\"")
     }
 
+    private static func matchesAuthor(_ item: ContentItem, query: String) -> Bool {
+        let cleaned = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return true }
+        return item.authorName?.localizedCaseInsensitiveContains(cleaned) == true
+    }
+
+    private static func matchesContent(_ item: ContentItem, query: String) -> Bool {
+        let cleaned = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return true }
+        let searchableText = item.searchableText ?? item.excerpt ?? ""
+        return item.title.localizedCaseInsensitiveContains(cleaned)
+            || searchableText.localizedCaseInsensitiveContains(cleaned)
+    }
+
+    private func resolvedURL(from source: String, baseURL: URL) -> URL? {
+        let unescaped = source
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+        if let absolute = URL(string: unescaped), absolute.scheme != nil {
+            return absolute
+        }
+        return URL(string: unescaped, relativeTo: baseURL)?.absoluteURL
+    }
+
+    private static func mimeType(for url: URL) -> String {
+        switch url.pathExtension.lowercased() {
+        case "jpg", "jpeg":
+            return "image/jpeg"
+        case "gif":
+            return "image/gif"
+        case "webp":
+            return "image/webp"
+        case "svg":
+            return "image/svg+xml"
+        default:
+            return "image/png"
+        }
+    }
+
     private static func flattenSystemInfo(_ value: JSONValue) -> [String: String] {
         guard case .object(let object) = value else { return [:] }
         var output: [String: String] = [:]
@@ -336,6 +523,29 @@ private struct CreateCommentRequest: Encodable {
     let body: StorageBody
 }
 
+private struct UpdateContentRequest: Encodable {
+    let id: String
+    let type: String
+    let title: String
+    let version: ContentVersionRequest
+    let body: StorageBody
+}
+
+private struct CreateContentRequest: Encodable {
+    let type: String
+    let title: String
+    let space: SpaceKeyRequest
+    let body: StorageBody
+}
+
+private struct ContentVersionRequest: Encodable {
+    let number: Int
+}
+
+private struct SpaceKeyRequest: Encodable {
+    let key: String
+}
+
 private struct ContentContainer: Encodable {
     let id: String
     let type: String
@@ -360,6 +570,8 @@ enum ConfluenceClientError: LocalizedError, Equatable {
     case decoding(String)
     case keychain(String)
     case emptyComment
+    case missingStorageBody
+    case missingSpace
 
     var errorDescription: String? {
         switch self {
@@ -381,6 +593,10 @@ enum ConfluenceClientError: LocalizedError, Equatable {
             return message
         case .emptyComment:
             return "请输入回复内容"
+        case .missingStorageBody:
+            return "当前文章缺少可编辑正文"
+        case .missingSpace:
+            return "当前文章缺少空间信息，无法复制"
         }
     }
 }
@@ -392,5 +608,12 @@ private extension String {
             value.removeLast()
         }
         return value
+    }
+
+    func htmlAttributeEscaped() -> String {
+        replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
     }
 }

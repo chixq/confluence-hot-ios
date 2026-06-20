@@ -1,23 +1,35 @@
 import SwiftUI
 import WebKit
+#if os(iOS)
+import UIKit
+#else
+import AppKit
+#endif
 
 struct ContentDetailView: View {
     @EnvironmentObject private var sessionStore: SessionStore
     @EnvironmentObject private var appSettings: AppSettings
     @Environment(\.openURL) private var openURL
+    @Environment(\.dismiss) private var dismiss
 
     let item: ContentItem
     @State private var detail: ContentDetail?
+    @State private var renderedHTML = ""
     @State private var comments: [CommentItem] = []
     @State private var isLoading = false
     @State private var isLoadingComments = false
     @State private var isPostingComment = false
+    @State private var isPerformingOperation = false
     @State private var errorMessage: String?
     @State private var commentsErrorMessage: String?
+    @State private var operationMessage: String?
     @State private var replyText = ""
     @State private var webContentHeight: CGFloat = 420
+    @State private var detailZoom = 1.0
     @State private var exportedHTMLFile: ExportedHTMLFile?
     @State private var exportErrorMessage: String?
+    @State private var isShowingEditor = false
+    @State private var isShowingDeleteConfirmation = false
 
     var body: some View {
         ScrollView {
@@ -34,7 +46,7 @@ struct ContentDetailView: View {
                     EmptyStateView(icon: "doc.text.magnifyingglass", title: "正文加载失败", message: errorMessage)
                 } else if let detail {
                     HTMLContentView(
-                        html: wrappedHTML(detail.renderedHTML),
+                        html: wrappedHTML(renderedHTML.isEmpty ? detail.renderedHTML : renderedHTML),
                         baseURL: sessionStore.configuration?.baseURL,
                         contentHeight: $webContentHeight,
                         minimumHeight: 420
@@ -50,6 +62,13 @@ struct ContentDetailView: View {
                     Text(exportErrorMessage)
                         .font(appSettings.subheadlineFont)
                         .foregroundStyle(AtlassianTheme.red)
+                        .padding(.horizontal, 16)
+                }
+
+                if let operationMessage {
+                    Text(operationMessage)
+                        .font(appSettings.subheadlineFont)
+                        .foregroundStyle(AtlassianTheme.mutedText)
                         .padding(.horizontal, 16)
                 }
 
@@ -72,6 +91,45 @@ struct ContentDetailView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
+                    Button {
+                        prepareEdit()
+                    } label: {
+                        Label("修改文章", systemImage: "square.and.pencil")
+                    }
+                    .disabled(detail?.storageHTML == nil || isPerformingOperation)
+
+                    Button {
+                        zoomIn()
+                    } label: {
+                        Label("放大正文", systemImage: "plus.magnifyingglass")
+                    }
+
+                    Button {
+                        zoomOut()
+                    } label: {
+                        Label("缩小正文", systemImage: "minus.magnifyingglass")
+                    }
+
+                    Button {
+                        copyLink()
+                    } label: {
+                        Label("复制链接", systemImage: "link")
+                    }
+
+                    Button {
+                        copyHTML()
+                    } label: {
+                        Label("复制 HTML", systemImage: "doc.on.doc")
+                    }
+                    .disabled(detail == nil)
+
+                    Button {
+                        Task { await copyAsNewPage() }
+                    } label: {
+                        Label("复制为副本", systemImage: "plus.square.on.square")
+                    }
+                    .disabled(detail == nil || isPerformingOperation)
+
                     if let baseURL = sessionStore.configuration?.baseURL,
                        let url = item.webURL(baseURL: baseURL) {
                         Button {
@@ -86,6 +144,15 @@ struct ContentDetailView: View {
                     } label: {
                         Label("导出 HTML", systemImage: "square.and.arrow.up")
                     }
+
+                    Divider()
+
+                    Button(role: .destructive) {
+                        isShowingDeleteConfirmation = true
+                    } label: {
+                        Label("删除文章", systemImage: "trash")
+                    }
+                    .disabled(isPerformingOperation)
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
@@ -96,6 +163,27 @@ struct ContentDetailView: View {
             ActivityView(activityItems: [file.url])
         }
         #endif
+        .sheet(isPresented: $isShowingEditor) {
+            if let detail {
+                ContentEditorSheet(
+                    title: detail.title,
+                    storageHTML: detail.storageHTML ?? "",
+                    isSaving: isPerformingOperation,
+                    onCancel: { isShowingEditor = false },
+                    onSave: { title, storageHTML in
+                        Task { await updateArticle(title: title, storageHTML: storageHTML) }
+                    }
+                )
+            }
+        }
+        .confirmationDialog("删除这篇文章？", isPresented: $isShowingDeleteConfirmation, titleVisibility: .visible) {
+            Button("删除", role: .destructive) {
+                Task { await deleteArticle() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("删除后需要在 Confluence Web 中从回收站恢复。")
+        }
         .task(id: item.id) {
             resetForCurrentItem()
             await load()
@@ -104,11 +192,14 @@ struct ContentDetailView: View {
 
     private func resetForCurrentItem() {
         detail = nil
+        renderedHTML = ""
         comments = []
         errorMessage = nil
         commentsErrorMessage = nil
+        operationMessage = nil
         replyText = ""
         webContentHeight = 420
+        detailZoom = 1.0
         exportErrorMessage = nil
     }
 
@@ -120,9 +211,10 @@ struct ContentDetailView: View {
         commentsErrorMessage = nil
 
         do {
-            async let detailTask = client.fetchDetail(id: item.id)
+            let fetchedDetail = try await client.fetchDetail(id: item.id)
             async let commentsTask = client.fetchComments(contentID: item.id)
-            detail = try await detailTask
+            detail = fetchedDetail
+            renderedHTML = await client.inlineAuthenticatedImages(in: fetchedDetail.renderedHTML, baseURL: sessionStore.configuration?.baseURL)
             comments = try await commentsTask
         } catch {
             if detail == nil {
@@ -167,6 +259,89 @@ struct ContentDetailView: View {
         isPostingComment = false
     }
 
+    private func prepareEdit() {
+        guard detail?.storageHTML != nil else {
+            operationMessage = "当前文章缺少可编辑正文"
+            return
+        }
+        isShowingEditor = true
+    }
+
+    private func updateArticle(title: String, storageHTML: String) async {
+        guard let client = sessionStore.client, let detail else { return }
+        isPerformingOperation = true
+        operationMessage = nil
+        do {
+            let updated = try await client.updateContent(
+                id: detail.id,
+                type: detail.type,
+                title: title,
+                storageHTML: storageHTML,
+                versionNumber: detail.nextVersionNumber
+            )
+            self.detail = updated
+            renderedHTML = await client.inlineAuthenticatedImages(in: updated.renderedHTML, baseURL: sessionStore.configuration?.baseURL)
+            operationMessage = "文章已更新"
+            isShowingEditor = false
+        } catch {
+            operationMessage = "更新失败：\(error.localizedDescription)"
+        }
+        isPerformingOperation = false
+    }
+
+    private func deleteArticle() async {
+        guard let client = sessionStore.client else { return }
+        isPerformingOperation = true
+        operationMessage = nil
+        do {
+            try await client.deleteContent(id: item.id)
+            operationMessage = "文章已删除"
+            dismiss()
+        } catch {
+            operationMessage = "删除失败：\(error.localizedDescription)"
+        }
+        isPerformingOperation = false
+    }
+
+    private func copyAsNewPage() async {
+        guard let client = sessionStore.client, let detail else { return }
+        isPerformingOperation = true
+        operationMessage = nil
+        do {
+            _ = try await client.copyContent(detail: detail)
+            operationMessage = "已复制为新文章"
+        } catch {
+            operationMessage = "复制失败：\(error.localizedDescription)"
+        }
+        isPerformingOperation = false
+    }
+
+    private func zoomIn() {
+        detailZoom = min(1.6, detailZoom + 0.1)
+        webContentHeight = 420
+    }
+
+    private func zoomOut() {
+        detailZoom = max(0.75, detailZoom - 0.1)
+        webContentHeight = 420
+    }
+
+    private func copyLink() {
+        guard let baseURL = sessionStore.configuration?.baseURL,
+              let url = item.webURL(baseURL: baseURL) else {
+            operationMessage = "当前文章没有可复制链接"
+            return
+        }
+        setClipboard(url.absoluteString)
+        operationMessage = "链接已复制"
+    }
+
+    private func copyHTML() {
+        guard let detail else { return }
+        setClipboard(detail.storageHTML ?? renderedHTML)
+        operationMessage = "HTML 已复制"
+    }
+
     private func exportHTML() {
         guard let detail else {
             exportErrorMessage = "正文尚未加载完成"
@@ -174,7 +349,7 @@ struct ContentDetailView: View {
         }
 
         do {
-            let html = exportedHTML(detail: detail, comments: comments)
+            let html = exportedHTML(detail: detail, bodyHTML: renderedHTML.isEmpty ? detail.renderedHTML : renderedHTML, comments: comments)
             let fileName = "\(safeFilename(detail.title)).html"
             let url = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
             try html.write(to: url, atomically: true, encoding: .utf8)
@@ -185,7 +360,7 @@ struct ContentDetailView: View {
         }
     }
 
-    private func exportedHTML(detail: ContentDetail, comments: [CommentItem]) -> String {
+    private func exportedHTML(detail: ContentDetail, bodyHTML: String, comments: [CommentItem]) -> String {
         let commentHTML = comments.map { comment in
             """
             <section class="comment">
@@ -217,7 +392,7 @@ struct ContentDetailView: View {
         <body>
           <h1>\(htmlEscaped(detail.title))</h1>
           <p class="meta">\(htmlEscaped(item.activitySummary))</p>
-          <article>\(detail.renderedHTML)</article>
+          <article>\(bodyHTML)</article>
           <section class="comments">
             <h2>回复</h2>
             \(commentHTML.isEmpty ? "<p class=\"meta\">暂无回复</p>" : commentHTML)
@@ -242,6 +417,15 @@ struct ContentDetailView: View {
             .replacingOccurrences(of: "\"", with: "&quot;")
     }
 
+    private func setClipboard(_ value: String) {
+        #if os(iOS)
+        UIPasteboard.general.string = value
+        #else
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+        #endif
+    }
+
     private func wrappedHTML(_ body: String) -> String {
         let text = appSettings.appearanceMode == .dark ? "#F4F5F7" : "#172B4D"
         let muted = appSettings.appearanceMode == .dark ? "#A5ADBA" : "#42526E"
@@ -260,7 +444,7 @@ struct ContentDetailView: View {
             body {
               color: \(text);
               font-family: \(appSettings.fontChoice.cssFamily);
-              font-size: \(Int(17 * appSettings.fontScale))px;
+              font-size: \(Int(17 * appSettings.fontScale * detailZoom))px;
               line-height: 1.62;
               padding: 18px;
               word-wrap: break-word;
@@ -464,26 +648,30 @@ struct CommentRow: View {
     @State private var contentHeight: CGFloat = 80
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(comment.authorName)
-                    .font(appSettings.headlineFont)
-                    .foregroundStyle(AtlassianTheme.text)
-                Spacer()
-                if let dateText = comment.dateText {
-                    Text(dateText)
-                        .font(appSettings.fontChoice.font(size: 12 * appSettings.fontScale, relativeTo: .caption))
-                        .foregroundStyle(AtlassianTheme.mutedText)
-                }
-            }
+        HStack(alignment: .top, spacing: 12) {
+            AuthenticatedAvatarView(name: comment.authorName, path: comment.authorAvatarPath, tint: AtlassianTheme.mutedText, size: 38)
 
-            HTMLContentView(
-                html: commentHTML(comment.html),
-                baseURL: nil,
-                contentHeight: $contentHeight,
-                minimumHeight: 34
-            )
-            .frame(height: contentHeight)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(comment.authorName)
+                        .font(appSettings.headlineFont)
+                        .foregroundStyle(AtlassianTheme.text)
+                    Spacer()
+                    if let dateText = comment.dateText {
+                        Text(dateText)
+                            .font(appSettings.fontChoice.font(size: 12 * appSettings.fontScale, relativeTo: .caption))
+                            .foregroundStyle(AtlassianTheme.mutedText)
+                    }
+                }
+
+                HTMLContentView(
+                    html: commentHTML(comment.html),
+                    baseURL: nil,
+                    contentHeight: $contentHeight,
+                    minimumHeight: 34
+                )
+                .frame(height: contentHeight)
+            }
         }
         .padding(14)
         .liquidGlassPanel(cornerRadius: 24)
@@ -512,6 +700,68 @@ struct CommentRow: View {
         <body>\(body)</body>
         </html>
         """
+    }
+}
+
+struct ContentEditorSheet: View {
+    @EnvironmentObject private var appSettings: AppSettings
+    @State private var title: String
+    @State private var storageHTML: String
+
+    let isSaving: Bool
+    let onCancel: () -> Void
+    let onSave: (String, String) -> Void
+
+    init(title: String, storageHTML: String, isSaving: Bool, onCancel: @escaping () -> Void, onSave: @escaping (String, String) -> Void) {
+        _title = State(initialValue: title)
+        _storageHTML = State(initialValue: storageHTML)
+        self.isSaving = isSaving
+        self.onCancel = onCancel
+        self.onSave = onSave
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 14) {
+                TextField("标题", text: $title)
+                    .font(appSettings.headlineFont)
+                    .textFieldStyle(.roundedBorder)
+
+                Text("正文使用 Confluence storage HTML。")
+                    .font(appSettings.subheadlineFont)
+                    .foregroundStyle(AtlassianTheme.mutedText)
+
+                TextEditor(text: $storageHTML)
+                    .font(.system(size: 14, design: .monospaced))
+                    .scrollContentBackground(.hidden)
+                    .padding(10)
+                    .background(AtlassianTheme.secondarySurface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(AtlassianTheme.separator, lineWidth: 0.8)
+                    )
+            }
+            .padding(16)
+            .navigationTitle("修改文章")
+            .inlineNavigationTitle()
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { onCancel() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button {
+                        onSave(title.trimmingCharacters(in: .whitespacesAndNewlines), storageHTML)
+                    } label: {
+                        if isSaving {
+                            ProgressView()
+                        } else {
+                            Text("保存")
+                        }
+                    }
+                    .disabled(isSaving || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || storageHTML.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
     }
 }
 
