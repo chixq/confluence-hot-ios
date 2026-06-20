@@ -134,44 +134,31 @@ struct AdaptiveFeedView: View {
 
 struct FeedListView: View {
     @EnvironmentObject private var sessionStore: SessionStore
+    @EnvironmentObject private var appSettings: AppSettings
     @ObservedObject var viewModel: ContentFeedViewModel
     @Binding var selectedItem: ContentItem?
     let compactNavigation: Bool
 
     var body: some View {
-        List {
-            Section {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
                 SectionHeader(title: viewModel.kind.title, subtitle: viewModel.kind.subtitle)
-                    .listRowInsets(EdgeInsets())
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
 
-                if viewModel.isLoading && viewModel.items.isEmpty {
-                    ProgressView()
-                        .tint(AtlassianTheme.blue)
-                        .frame(maxWidth: .infinity, minHeight: 260)
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(Color.clear)
-                } else if let errorMessage = viewModel.errorMessage {
-                    EmptyStateView(icon: "exclamationmark.triangle", title: "加载失败", message: errorMessage)
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(Color.clear)
-                } else if viewModel.items.isEmpty {
-                    EmptyStateView(icon: "tray", title: viewModel.kind.emptyTitle, message: "换个时间刷新看看")
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(Color.clear)
-                } else {
-                    ForEach(viewModel.items) { item in
-                        row(for: item)
-                            .listRowInsets(EdgeInsets(top: 5, leading: 16, bottom: 5, trailing: 16))
-                            .listRowSeparator(.hidden)
-                            .listRowBackground(Color.clear)
+                if let lastLoadedAt = viewModel.lastLoadedAt {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.icloud")
+                        Text("已更新 \(lastLoadedAt.formatted(date: .omitted, time: .shortened))")
                     }
+                    .font(appSettings.fontChoice.font(size: 12 * appSettings.fontScale, relativeTo: .caption))
+                    .foregroundStyle(AtlassianTheme.mutedText)
+                    .padding(.horizontal, 22)
+                    .padding(.top, -8)
                 }
+
+                content
             }
+            .padding(.bottom, 28)
         }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
         .background(LiquidBackground())
         .inlineNavigationTitle()
         .liquidNavigationChrome()
@@ -194,20 +181,50 @@ struct FeedListView: View {
     }
 
     @ViewBuilder
+    private var content: some View {
+        if viewModel.isLoading && viewModel.items.isEmpty {
+            ProgressView()
+                .tint(AtlassianTheme.blue)
+                .frame(maxWidth: .infinity, minHeight: 260)
+                .padding(.horizontal, 16)
+        } else if let errorMessage = viewModel.errorMessage {
+            EmptyStateView(icon: "exclamationmark.triangle", title: "加载失败", message: errorMessage)
+                .padding(.horizontal, 16)
+        } else if viewModel.items.isEmpty {
+            EmptyStateView(icon: "tray", title: viewModel.kind.emptyTitle, message: "换个时间刷新看看")
+                .padding(.horizontal, 16)
+        } else {
+            LazyVStack(spacing: 0) {
+                ForEach(Array(viewModel.items.enumerated()), id: \.element.id) { index, item in
+                    row(for: item)
+                    if index < viewModel.items.count - 1 {
+                        Divider()
+                            .padding(.leading, 72)
+                            .padding(.trailing, 12)
+                    }
+                }
+            }
+            .padding(8)
+            .liquidGlassPanel(cornerRadius: 30)
+            .padding(.horizontal, 16)
+        }
+    }
+
+    @ViewBuilder
     private func row(for item: ContentItem) -> some View {
         if compactNavigation {
             NavigationLink {
                 ContentDetailView(item: item)
                     .id(item.id)
             } label: {
-                ContentRow(item: item, isSelected: false)
+                ContentRow(item: item, isSelected: false, showsChevron: true)
             }
             .buttonStyle(.plain)
         } else {
             Button {
                 selectedItem = item
             } label: {
-                ContentRow(item: item, isSelected: selectedItem?.id == item.id)
+                ContentRow(item: item, isSelected: selectedItem?.id == item.id, showsChevron: false)
             }
             .buttonStyle(.plain)
         }
@@ -216,6 +233,7 @@ struct FeedListView: View {
 
 struct SearchView: View {
     @EnvironmentObject private var sessionStore: SessionStore
+    @EnvironmentObject private var appSettings: AppSettings
     @State private var query = ""
     @State private var items: [ContentItem] = []
     @State private var isLoading = false
@@ -223,66 +241,89 @@ struct SearchView: View {
 
     var body: some View {
         ScrollView {
-            SectionHeader(title: "搜索", subtitle: sessionStore.configuration?.baseURL.host)
+            VStack(alignment: .leading, spacing: 16) {
+                SectionHeader(title: "搜索", subtitle: sessionStore.configuration?.baseURL.host)
 
-            VStack(spacing: 12) {
-                HStack(spacing: 10) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(AtlassianTheme.mutedText)
-                    TextField("标题或正文", text: $query)
-                        .submitLabel(.search)
-                        .onSubmit {
-                            Task { await search() }
-                        }
-                    if !query.isEmpty {
-                        Button {
-                            query = ""
-                            items = []
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(AtlassianTheme.mutedText)
+                VStack(spacing: 12) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(AtlassianTheme.mutedText)
+                        TextField("标题或正文", text: $query)
+                            .submitLabel(.search)
+                            .autocorrectionDisabled()
+                            .onSubmit {
+                                Task { await search() }
+                            }
+                        if !query.isEmpty {
+                            Button {
+                                query = ""
+                                items = []
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(AtlassianTheme.mutedText)
+                            }
                         }
                     }
-                }
-                .padding(12)
-                .liquidGlassPanel(cornerRadius: 22)
+                    .font(appSettings.baseFont)
+                    .liquidField()
 
-                Button {
-                    Task { await search() }
-                } label: {
-                    Label("搜索", systemImage: "arrow.right")
-                }
-                .buttonStyle(PrimaryButtonStyle())
-                .disabled(isLoading)
-            }
-            .padding(.horizontal, 16)
-
-            LazyVStack(spacing: 10) {
-                if isLoading {
-                    ProgressView()
-                        .tint(AtlassianTheme.blue)
-                        .frame(maxWidth: .infinity, minHeight: 180)
-                } else if let errorMessage {
-                    EmptyStateView(icon: "exclamationmark.triangle", title: "搜索失败", message: errorMessage)
-                } else {
-                    ForEach(items) { item in
-                        NavigationLink {
-                            ContentDetailView(item: item)
-                                .id(item.id)
-                        } label: {
-                            ContentRow(item: item)
-                        }
-                        .buttonStyle(.plain)
+                    Button {
+                        Task { await search() }
+                    } label: {
+                        Label("搜索", systemImage: "arrow.right")
                     }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .disabled(isLoading || query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
+                .padding(.horizontal, 16)
+
+                searchResults
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 16)
             .padding(.bottom, 28)
         }
         .background(LiquidBackground())
         .inlineNavigationTitle()
         .liquidNavigationChrome()
+    }
+
+    @ViewBuilder
+    private var searchResults: some View {
+        if isLoading {
+            ProgressView()
+                .tint(AtlassianTheme.blue)
+                .frame(maxWidth: .infinity, minHeight: 180)
+                .padding(.horizontal, 16)
+        } else if let errorMessage {
+            EmptyStateView(icon: "exclamationmark.triangle", title: "搜索失败", message: errorMessage)
+                .padding(.horizontal, 16)
+        } else if items.isEmpty && !query.isEmpty {
+            EmptyStateView(icon: "magnifyingglass", title: "暂无结果", message: "换个关键词试试")
+                .padding(.horizontal, 16)
+        } else if items.isEmpty {
+            EmptyStateView(icon: "text.magnifyingglass", title: "查找 Confluence 内容", message: "输入标题、正文关键词或页面主题")
+                .padding(.horizontal, 16)
+        } else {
+            LazyVStack(spacing: 0) {
+                ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                    NavigationLink {
+                        ContentDetailView(item: item)
+                            .id(item.id)
+                    } label: {
+                        ContentRow(item: item, showsChevron: true)
+                    }
+                    .buttonStyle(.plain)
+
+                    if index < items.count - 1 {
+                        Divider()
+                            .padding(.leading, 72)
+                            .padding(.trailing, 12)
+                    }
+                }
+            }
+            .padding(8)
+            .liquidGlassPanel(cornerRadius: 30)
+            .padding(.horizontal, 16)
+        }
     }
 
     private func search() async {
@@ -305,17 +346,11 @@ struct ContentRow: View {
 
     let item: ContentItem
     var isSelected = false
+    var showsChevron = true
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(iconBackground)
-                Image(systemName: item.type.lowercased().contains("blog") ? "text.bubble" : "doc.text")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(iconForeground)
-            }
-            .frame(width: 42, height: 42)
+            IconBadge(systemName: iconName, tint: iconForeground)
 
             VStack(alignment: .leading, spacing: 7) {
                 Text(item.title)
@@ -330,42 +365,57 @@ struct ContentRow: View {
                         Text(spaceName)
                             .font(appSettings.fontChoice.font(size: 12 * appSettings.fontScale, relativeTo: .caption))
                             .foregroundStyle(AtlassianTheme.mutedText)
-                            .lineLimit(1)
+                        .lineLimit(1)
                     }
                 }
 
-                if let authorName = item.authorName, !authorName.isEmpty {
-                    Text(authorName)
-                        .font(appSettings.fontChoice.font(size: 12 * appSettings.fontScale, relativeTo: .caption))
-                        .foregroundStyle(AtlassianTheme.mutedText)
-                        .lineLimit(1)
-                }
+                HStack(spacing: 8) {
+                    if let authorName = item.authorName, !authorName.isEmpty {
+                        Label(authorName, systemImage: "person.crop.circle")
+                            .labelStyle(.titleAndIcon)
+                            .lineLimit(1)
+                    }
 
-                if !item.activitySummary.isEmpty {
-                    Text(item.activitySummary)
+                    if !item.activitySummary.isEmpty {
+                        Text(item.activitySummary)
+                            .lineLimit(1)
+                    }
+                }
+                .font(appSettings.fontChoice.font(size: 12 * appSettings.fontScale, relativeTo: .caption))
+                .foregroundStyle(AtlassianTheme.mutedText)
+
+                if let excerpt = item.excerpt, !excerpt.isEmpty {
+                    Text(excerpt)
                         .font(appSettings.fontChoice.font(size: 12 * appSettings.fontScale, relativeTo: .caption))
                         .foregroundStyle(AtlassianTheme.mutedText)
-                        .lineLimit(1)
+                        .lineLimit(2)
                 }
             }
 
             Spacer(minLength: 0)
 
-            Image(systemName: "chevron.right")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(AtlassianTheme.mutedText)
-                .padding(.top, 5)
+            if showsChevron {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(AtlassianTheme.mutedText.opacity(0.75))
+                    .padding(.top, 8)
+            }
         }
-        .padding(14)
-        .liquidGlassPanel(cornerRadius: 24, isSelected: isSelected)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 12)
+        .background(isSelected ? AtlassianTheme.blue.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
 
-    private var iconBackground: Color {
-        item.origin == .popular ? AtlassianTheme.yellow.opacity(0.18) : AtlassianTheme.blue.opacity(0.12)
+    private var iconName: String {
+        if item.origin == .popular {
+            return "flame.fill"
+        }
+        return item.type.lowercased().contains("blog") ? "text.bubble.fill" : "doc.text.fill"
     }
 
     private var iconForeground: Color {
-        item.origin == .popular ? Color(hex: 0x974F0C) : AtlassianTheme.blue
+        item.origin == .popular ? Color(hex: 0xA15C00) : AtlassianTheme.blue
     }
 }
 
@@ -379,8 +429,7 @@ struct TagView: View {
             .font(appSettings.fontChoice.font(size: 12 * appSettings.fontScale, relativeTo: .caption))
             .foregroundStyle(AtlassianTheme.blue)
             .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(.ultraThinMaterial, in: Capsule())
-            .overlay(Capsule().stroke(Color.white.opacity(0.32), lineWidth: 0.7))
+            .padding(.vertical, 4)
+            .background(AtlassianTheme.blue.opacity(0.10), in: Capsule())
     }
 }

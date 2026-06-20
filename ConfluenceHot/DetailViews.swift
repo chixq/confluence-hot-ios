@@ -15,26 +15,14 @@ struct ContentDetailView: View {
     @State private var errorMessage: String?
     @State private var commentsErrorMessage: String?
     @State private var replyText = ""
-    @State private var webContentHeight: CGFloat = 560
+    @State private var webContentHeight: CGFloat = 420
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                VStack(alignment: .leading, spacing: 10) {
-                    TagView(text: item.typeLabel)
-                    Text(detail?.title ?? item.title)
-                        .font(appSettings.titleFont)
-                        .foregroundStyle(AtlassianTheme.text)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    if !item.activitySummary.isEmpty {
-                        Text(item.activitySummary)
-                            .font(appSettings.subheadlineFont)
-                            .foregroundStyle(AtlassianTheme.mutedText)
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.top, 18)
+            VStack(alignment: .leading, spacing: 18) {
+                DetailHeaderView(item: item, title: detail?.title ?? item.title)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 18)
 
                 if isLoading && detail == nil {
                     ProgressView()
@@ -46,11 +34,13 @@ struct ContentDetailView: View {
                     HTMLContentView(
                         html: wrappedHTML(detail.renderedHTML),
                         baseURL: sessionStore.configuration?.baseURL,
-                        contentHeight: $webContentHeight
+                        contentHeight: $webContentHeight,
+                        minimumHeight: 420
                     )
                         .frame(height: webContentHeight)
-                        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-                        .liquidGlassPanel(cornerRadius: 24)
+                        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                        .padding(6)
+                        .liquidGlassPanel(cornerRadius: 30)
                         .padding(.horizontal, 16)
                 }
 
@@ -94,7 +84,7 @@ struct ContentDetailView: View {
         errorMessage = nil
         commentsErrorMessage = nil
         replyText = ""
-        webContentHeight = 560
+        webContentHeight = 420
     }
 
     private func load() async {
@@ -153,11 +143,11 @@ struct ContentDetailView: View {
     }
 
     private func wrappedHTML(_ body: String) -> String {
-        let background = appSettings.appearanceMode == .dark ? "#1B1F29" : "#FFFFFF"
         let text = appSettings.appearanceMode == .dark ? "#F4F5F7" : "#172B4D"
         let muted = appSettings.appearanceMode == .dark ? "#A5ADBA" : "#42526E"
         let border = appSettings.appearanceMode == .dark ? "#303849" : "#DFE1E6"
         let codeBackground = appSettings.appearanceMode == .dark ? "#242936" : "#F4F5F7"
+        let tableHeader = appSettings.appearanceMode == .dark ? "#202635" : "#F8FAFD"
 
         return """
         <!doctype html>
@@ -166,25 +156,27 @@ struct ContentDetailView: View {
           <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
           <style>
             :root { color-scheme: \(appSettings.appearanceMode == .dark ? "dark" : "light"); }
-            html, body { margin: 0; padding: 0; background: \(background); }
+            html, body { margin: 0; padding: 0; background: transparent; }
             body {
               color: \(text);
               font-family: \(appSettings.fontChoice.cssFamily);
-              font-size: \(Int(16 * appSettings.fontScale))px;
-              line-height: 1.52;
+              font-size: \(Int(17 * appSettings.fontScale))px;
+              line-height: 1.62;
               padding: 18px;
               word-wrap: break-word;
               overflow-wrap: anywhere;
             }
+            h1, h2, h3, h4 { line-height: 1.22; margin: 22px 0 10px; }
+            p { margin: 0 0 13px; }
             a { color: #0052CC; text-decoration: none; }
-            img, video { max-width: 100%; height: auto; border-radius: 6px; }
+            img, video { max-width: 100%; height: auto; border-radius: 12px; }
             .table-scroll {
               width: 100%;
               overflow-x: auto;
               -webkit-overflow-scrolling: touch;
-              margin: 12px 0;
+              margin: 14px 0;
               border: 1px solid \(border);
-              border-radius: 6px;
+              border-radius: 12px;
             }
             table {
               border-collapse: collapse;
@@ -201,17 +193,17 @@ struct ContentDetailView: View {
               white-space: normal;
               min-width: 96px;
             }
-            th { background: \(codeBackground); font-weight: 600; }
+            th { background: \(tableHeader); font-weight: 650; }
             pre, code {
               background: \(codeBackground);
-              border-radius: 6px;
+              border-radius: 8px;
               font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
             }
-            pre { padding: 12px; overflow-x: auto; }
+            pre { padding: 13px; overflow-x: auto; }
             blockquote {
               border-left: 3px solid #0052CC;
               margin: 12px 0;
-              padding: 4px 0 4px 12px;
+              padding: 6px 0 6px 14px;
               color: \(muted);
             }
           </style>
@@ -248,8 +240,9 @@ struct CommentSectionView: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Text("回复")
-                    .font(appSettings.titleFont)
+                    .font(appSettings.fontChoice == .system ? .title3.weight(.bold) : appSettings.fontChoice.font(size: 21 * appSettings.fontScale, relativeTo: .title3))
                     .foregroundStyle(AtlassianTheme.text)
+                CapsuleMetric(text: "\(comments.count)", systemName: "bubble.left.and.bubble.right.fill", tint: AtlassianTheme.teal)
                 Spacer()
                 Button {
                     Task { await onReload() }
@@ -270,12 +263,15 @@ struct CommentSectionView: View {
                     .tint(AtlassianTheme.blue)
                     .frame(maxWidth: .infinity, minHeight: 80)
             } else if comments.isEmpty {
-                Text("暂无回复")
-                    .font(appSettings.subheadlineFont)
-                    .foregroundStyle(AtlassianTheme.mutedText)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(14)
-                    .liquidGlassPanel(cornerRadius: 22)
+                HStack(spacing: 10) {
+                    IconBadge(systemName: "bubble.left", tint: AtlassianTheme.mutedText)
+                    Text("暂无回复")
+                        .font(appSettings.subheadlineFont)
+                        .foregroundStyle(AtlassianTheme.mutedText)
+                    Spacer()
+                }
+                .padding(14)
+                .liquidGlassPanel(cornerRadius: 24)
             } else {
                 ForEach(comments) { comment in
                     CommentRow(comment: comment)
@@ -292,10 +288,10 @@ struct CommentSectionView: View {
                     .frame(minHeight: 96)
                     .scrollContentBackground(.hidden)
                     .padding(8)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .stroke(Color.white.opacity(0.34), lineWidth: 1)
+                            .stroke(AtlassianTheme.separator.opacity(0.55), lineWidth: 0.8)
                     )
 
                 Button {
@@ -312,8 +308,45 @@ struct CommentSectionView: View {
                 .disabled(isPosting || replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .padding(14)
-            .liquidGlassPanel(cornerRadius: 24)
+            .liquidGlassPanel(cornerRadius: 28)
         }
+    }
+}
+
+struct DetailHeaderView: View {
+    @EnvironmentObject private var appSettings: AppSettings
+
+    let item: ContentItem
+    let title: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                TagView(text: item.typeLabel)
+                if item.origin == .popular {
+                    CapsuleMetric(text: "热门", systemName: "flame.fill", tint: Color(hex: 0xA15C00))
+                }
+            }
+
+            Text(title)
+                .font(appSettings.fontChoice == .system ? .title.weight(.bold) : appSettings.fontChoice.font(size: 28 * appSettings.fontScale, relativeTo: .title))
+                .foregroundStyle(AtlassianTheme.text)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 8) {
+                if let authorName = item.authorName, !authorName.isEmpty {
+                    Label(authorName, systemImage: "person.crop.circle")
+                        .lineLimit(1)
+                }
+                if !item.activitySummary.isEmpty {
+                    Label(item.activitySummary, systemImage: "clock")
+                        .lineLimit(2)
+                }
+            }
+            .font(appSettings.subheadlineFont)
+            .foregroundStyle(AtlassianTheme.mutedText)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -339,7 +372,8 @@ struct CommentRow: View {
             HTMLContentView(
                 html: commentHTML(comment.html),
                 baseURL: nil,
-                contentHeight: $contentHeight
+                contentHeight: $contentHeight,
+                minimumHeight: 34
             )
             .frame(height: contentHeight)
         }
@@ -348,7 +382,6 @@ struct CommentRow: View {
     }
 
     private func commentHTML(_ body: String) -> String {
-        let background = appSettings.appearanceMode == .dark ? "#1B1F29" : "#FFFFFF"
         let text = appSettings.appearanceMode == .dark ? "#F4F5F7" : "#172B4D"
         return """
         <!doctype html>
@@ -356,7 +389,7 @@ struct CommentRow: View {
         <head>
           <meta name="viewport" content="width=device-width, initial-scale=1">
           <style>
-            html, body { margin: 0; padding: 0; background: \(background); color: \(text); }
+            html, body { margin: 0; padding: 0; background: transparent; color: \(text); }
             body {
               font-family: \(appSettings.fontChoice.cssFamily);
               font-size: \(Int(15 * appSettings.fontScale))px;
@@ -379,6 +412,7 @@ struct HTMLContentView: UIViewRepresentable {
     let html: String
     let baseURL: URL?
     @Binding var contentHeight: CGFloat
+    var minimumHeight: CGFloat = 80
 
     func makeUIView(context: Context) -> WKWebView {
         let view = WKWebView(frame: .zero)
@@ -416,11 +450,11 @@ struct HTMLContentView: UIViewRepresentable {
                 } else if let value = result as? Double {
                     height = CGFloat(value)
                 } else {
-                    height = 560
+                    height = self.parent.minimumHeight
                 }
 
                 DispatchQueue.main.async {
-                    self.parent.contentHeight = max(560, height)
+                    self.parent.contentHeight = max(self.parent.minimumHeight, height)
                 }
             }
         }
@@ -431,6 +465,7 @@ struct HTMLContentView: NSViewRepresentable {
     let html: String
     let baseURL: URL?
     @Binding var contentHeight: CGFloat
+    var minimumHeight: CGFloat = 80
 
     func makeNSView(context: Context) -> WKWebView {
         let view = WKWebView(frame: .zero)
@@ -466,11 +501,11 @@ struct HTMLContentView: NSViewRepresentable {
                 } else if let value = result as? Double {
                     height = CGFloat(value)
                 } else {
-                    height = 560
+                    height = self.parent.minimumHeight
                 }
 
                 DispatchQueue.main.async {
-                    self.parent.contentHeight = max(560, height)
+                    self.parent.contentHeight = max(self.parent.minimumHeight, height)
                 }
             }
         }

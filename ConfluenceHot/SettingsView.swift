@@ -15,18 +15,29 @@ struct SettingsView: View {
 
             VStack(spacing: 16) {
                 settingsCard(title: "账号") {
-                    VStack(spacing: 14) {
-                        TextField("站点 URL", text: $baseURL)
-                            .textContentType(.URL)
-                            .textFieldStyle(.roundedBorder)
-                            .autocorrectionDisabled()
-                        TextField("用户名", text: $username)
-                            .textContentType(.username)
-                            .textFieldStyle(.roundedBorder)
-                            .autocorrectionDisabled()
-                        SecureField("新密码", text: $password)
-                            .textContentType(.password)
-                            .textFieldStyle(.roundedBorder)
+                    VStack(alignment: .leading, spacing: 12) {
+                        inputField(title: "站点 URL", systemImage: "link") {
+                            TextField("wiki.fit2cloud.com", text: $baseURL)
+                                .textContentType(.URL)
+                                .textFieldStyle(.plain)
+                                .autocorrectionDisabled()
+                                .liquidField()
+                        }
+
+                        inputField(title: "用户名", systemImage: "person") {
+                            TextField("username", text: $username)
+                                .textContentType(.username)
+                                .textFieldStyle(.plain)
+                                .autocorrectionDisabled()
+                                .liquidField()
+                        }
+
+                        inputField(title: "密码", systemImage: "lock") {
+                            SecureField("留空则不修改", text: $password)
+                                .textContentType(.password)
+                                .textFieldStyle(.plain)
+                                .liquidField()
+                        }
                     }
 
                     if let errorMessage = sessionStore.errorMessage {
@@ -50,61 +61,78 @@ struct SettingsView: View {
                 }
 
                 settingsCard(title: "显示") {
-                    Picker("夜间模式", selection: Binding(
-                        get: { appSettings.appearanceMode },
-                        set: { appSettings.appearanceMode = $0 }
-                    )) {
-                        ForEach(AppearanceMode.allCases) { mode in
-                            Text(mode.title).tag(mode)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-
-                    Picker("字体", selection: Binding(
-                        get: { appSettings.fontChoice },
-                        set: { appSettings.fontChoice = $0 }
-                    )) {
-                        ForEach(InterfaceFontChoice.allCases) { choice in
-                            Text(choice.title).tag(choice)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("字号")
-                            Spacer()
-                            Text("\(Int(appSettings.fontScale * 100))%")
+                    VStack(alignment: .leading, spacing: 16) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("夜间模式", systemImage: "moon")
+                                .font(appSettings.subheadlineFont)
                                 .foregroundStyle(AtlassianTheme.mutedText)
+                            Picker("夜间模式", selection: Binding(
+                                get: { appSettings.appearanceMode },
+                                set: { appSettings.appearanceMode = $0 }
+                            )) {
+                                ForEach(AppearanceMode.allCases) { mode in
+                                    Text(mode.title).tag(mode)
+                                }
+                            }
+                            .pickerStyle(.segmented)
                         }
-                        Slider(value: $appSettings.fontScale, in: 0.85...1.25, step: 0.05)
-                    }
 
-                    Toggle("横屏分栏阅读", isOn: $appSettings.landscapeSplitEnabled)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("字体", systemImage: "textformat")
+                                .font(appSettings.subheadlineFont)
+                                .foregroundStyle(AtlassianTheme.mutedText)
+                            Picker("字体", selection: Binding(
+                                get: { appSettings.fontChoice },
+                                set: { appSettings.fontChoice = $0 }
+                            )) {
+                                ForEach(InterfaceFontChoice.allCases) { choice in
+                                    Text(choice.title).tag(choice)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Label("字号", systemImage: "textformat.size")
+                                Spacer()
+                                Text("\(Int(appSettings.fontScale * 100))%")
+                                    .foregroundStyle(AtlassianTheme.mutedText)
+                            }
+                            .font(appSettings.subheadlineFont)
+                            Slider(value: $appSettings.fontScale, in: 0.85...1.25, step: 0.05)
+                        }
+
+                        Toggle(isOn: $appSettings.landscapeSplitEnabled) {
+                            Label("横屏分栏阅读", systemImage: "rectangle.split.2x1")
+                        }
+                    }
                 }
 
                 settingsCard(title: "热门推送") {
-                    Picker("检查频率", selection: Binding(
-                        get: { appSettings.notificationFrequency },
-                        set: { frequency in
-                            appSettings.notificationFrequency = frequency
-                            Task { await updateNotifications() }
+                    VStack(alignment: .leading, spacing: 12) {
+                        Picker("检查频率", selection: Binding(
+                            get: { appSettings.notificationFrequency },
+                            set: { frequency in
+                                appSettings.notificationFrequency = frequency
+                                Task { await updateNotifications() }
+                            }
+                        )) {
+                            ForEach(PopularNotificationFrequency.allCases) { frequency in
+                                Text(frequency.title).tag(frequency)
+                            }
                         }
-                    )) {
-                        ForEach(PopularNotificationFrequency.allCases) { frequency in
-                            Text(frequency.title).tag(frequency)
-                        }
-                    }
-                    .pickerStyle(.segmented)
+                        .pickerStyle(.segmented)
 
-                    Text("开启后会在系统允许的后台刷新窗口内检查热门内容，只推送之前没有提醒过的新热门。iOS 会按电量、网络和使用习惯调整实际执行时间。")
-                        .font(appSettings.subheadlineFont)
-                        .foregroundStyle(AtlassianTheme.mutedText)
-
-                    if let notificationStatusText {
-                        Text(notificationStatusText)
+                        Text("开启后会在系统允许的后台刷新窗口内检查热门内容，只推送之前没有提醒过的新热门。iOS 会按电量、网络和使用习惯调整实际执行时间。")
                             .font(appSettings.subheadlineFont)
                             .foregroundStyle(AtlassianTheme.mutedText)
+
+                        if let notificationStatusText {
+                            Text(notificationStatusText)
+                                .font(appSettings.subheadlineFont)
+                                .foregroundStyle(AtlassianTheme.blue)
+                        }
                     }
                 }
 
@@ -134,12 +162,26 @@ struct SettingsView: View {
     private func settingsCard<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(title)
-                .font(appSettings.headlineFont)
-                .foregroundStyle(AtlassianTheme.text)
+                .font(appSettings.fontChoice.font(size: 13 * appSettings.fontScale, relativeTo: .caption).weight(.semibold))
+                .foregroundStyle(AtlassianTheme.mutedText)
+                .textCase(.uppercase)
+                .padding(.horizontal, 4)
+
+            VStack(alignment: .leading, spacing: 16) {
+                content()
+            }
+            .padding(16)
+            .liquidGlassPanel(cornerRadius: 28)
+        }
+    }
+
+    private func inputField<Content: View>(title: String, systemImage: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label(title, systemImage: systemImage)
+                .font(appSettings.subheadlineFont)
+                .foregroundStyle(AtlassianTheme.mutedText)
             content()
         }
-        .padding(16)
-        .liquidGlassPanel(cornerRadius: 26)
     }
 
     private func save() async {
