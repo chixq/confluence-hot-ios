@@ -305,82 +305,56 @@ struct FeedListView: View {
 @MainActor
 final class WorkBentoViewModel: ObservableObject {
     @Published private(set) var drafts: [ContentItem] = []
-    @Published private(set) var todoPage: TodoPage?
+    @Published private(set) var todos: [TodoItem] = []
     @Published private(set) var isLoading = false
     @Published private(set) var isUpdatingTodos = false
     @Published var errorMessage: String?
 
-    private var client: ConfluenceClient?
-    private var user: UserProfile?
+    private var todoStorageKey: String?
 
     var openTodoCount: Int {
-        todoPage?.todos.filter { !$0.isDone }.count ?? 0
+        todos.filter { !$0.isDone }.count
     }
 
-    func load(client: ConfluenceClient?, user: UserProfile?) async {
-        guard let client, let user else { return }
-        self.client = client
-        self.user = user
+    func load(client: ConfluenceClient?, user: UserProfile?, configuration: ServerConfiguration?) async {
+        guard let client else { return }
+        todoStorageKey = Self.todoKey(configuration: configuration, user: user)
         guard !isLoading else { return }
 
         isLoading = true
         errorMessage = nil
         async let draftsTask = loadDrafts(client: client)
-        async let todoTask = loadTodoPage(client: client, user: user)
         drafts = await draftsTask
-        todoPage = await todoTask
+        todos = todoStorageKey.flatMap { LocalTodoStore.load(key: $0) } ?? []
         isLoading = false
-    }
-
-    func createTodoPageIfNeeded() async -> Bool {
-        if todoPage != nil { return true }
-        guard let client, let user else { return false }
-
-        isUpdatingTodos = true
-        errorMessage = nil
-        defer { isUpdatingTodos = false }
-
-        do {
-            todoPage = try await client.createTodoPage(for: user)
-            return true
-        } catch {
-            errorMessage = error.localizedDescription
-            return false
-        }
     }
 
     func addTodo(title: String) async {
         let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty, let page = todoPage else { return }
-        var todos = page.todos
-        todos.insert(TodoItem(id: UUID().uuidString, title: cleaned, isDone: false), at: 0)
-        await saveTodos(todos, page: page)
+        guard !cleaned.isEmpty else { return }
+        var updated = todos
+        updated.insert(TodoItem(id: UUID().uuidString, title: cleaned, isDone: false), at: 0)
+        await saveTodos(updated)
     }
 
     func toggleTodo(_ item: TodoItem) async {
-        guard let page = todoPage else { return }
-        let todos = page.todos.map { current in
+        let updated = todos.map { current in
             current.id == item.id ? TodoItem(id: current.id, title: current.title, isDone: !current.isDone) : current
         }
-        await saveTodos(todos, page: page)
+        await saveTodos(updated)
     }
 
     func deleteTodo(_ item: TodoItem) async {
-        guard let page = todoPage else { return }
-        await saveTodos(page.todos.filter { $0.id != item.id }, page: page)
+        await saveTodos(todos.filter { $0.id != item.id })
     }
 
-    private func saveTodos(_ todos: [TodoItem], page: TodoPage) async {
-        guard let client else { return }
+    private func saveTodos(_ updated: [TodoItem]) async {
+        guard let todoStorageKey else { return }
         isUpdatingTodos = true
         errorMessage = nil
         defer { isUpdatingTodos = false }
-
-        do {
-            todoPage = try await client.updateTodoPage(page, todos: todos)
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        todos = updated
+        LocalTodoStore.save(updated, key: todoStorageKey)
     }
 
     private func loadDrafts(client: ConfluenceClient) async -> [ContentItem] {
@@ -391,12 +365,25 @@ final class WorkBentoViewModel: ObservableObject {
         }
     }
 
-    private func loadTodoPage(client: ConfluenceClient, user: UserProfile) async -> TodoPage? {
-        do {
-            return try await client.fetchTodoPage(for: user)
-        } catch {
-            return nil
+    private static func todoKey(configuration: ServerConfiguration?, user: UserProfile?) -> String? {
+        guard let configuration else { return nil }
+        let userID = user?.stableID ?? configuration.username
+        return "local.todos.\(configuration.baseURL.absoluteString)|\(userID)"
+    }
+}
+
+private enum LocalTodoStore {
+    static func load(key: String) -> [TodoItem] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let items = try? JSONDecoder().decode([TodoItem].self, from: data) else {
+            return []
         }
+        return items
+    }
+
+    static func save(_ items: [TodoItem], key: String) {
+        guard let data = try? JSONEncoder().encode(items) else { return }
+        UserDefaults.standard.set(data, forKey: key)
     }
 }
 
@@ -406,7 +393,6 @@ struct WorkBentoHeader: View {
     @StateObject private var viewModel = WorkBentoViewModel()
     @State private var showsDrafts = false
     @State private var showsTodos = false
-    @State private var showsCreateTodoAlert = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -419,25 +405,22 @@ struct WorkBentoHeader: View {
                         subtitle: "编辑中的页面",
                         count: viewModel.drafts.count,
                         systemImage: "doc.text.fill",
-                        tint: AtlassianTheme.blue
+                        iconColor: Color(hex: 0xDFFCF0),
+                        gradient: [Color(hex: 0x20C997), Color(hex: 0x0B8F5A)]
                     )
                 }
                 .buttonStyle(.plain)
 
                 Button {
-                    if viewModel.todoPage == nil {
-                        showsCreateTodoAlert = true
-                    } else {
-                        showsTodos = true
-                    }
+                    showsTodos = true
                 } label: {
                     WorkBentoTile(
                         title: "待办",
-                        subtitle: "私人任务列表",
+                        subtitle: "本地任务列表",
                         count: viewModel.openTodoCount,
                         systemImage: "checkmark.circle.fill",
-                        tint: AtlassianTheme.red,
-                        isProminent: true
+                        iconColor: Color(hex: 0xFFE9E6),
+                        gradient: [Color(hex: 0xFF5A52), Color(hex: 0xD92D20)]
                     )
                 }
                 .buttonStyle(.plain)
@@ -450,10 +433,10 @@ struct WorkBentoHeader: View {
             }
         }
         .task {
-            await viewModel.load(client: sessionStore.client, user: sessionStore.user)
+            await viewModel.load(client: sessionStore.client, user: sessionStore.user, configuration: sessionStore.configuration)
         }
         .refreshable {
-            await viewModel.load(client: sessionStore.client, user: sessionStore.user)
+            await viewModel.load(client: sessionStore.client, user: sessionStore.user, configuration: sessionStore.configuration)
         }
         .sheet(isPresented: $showsDrafts) {
             NavigationStack {
@@ -465,18 +448,6 @@ struct WorkBentoHeader: View {
                 TodoListView(viewModel: viewModel)
             }
         }
-        .alert("创建私人待办页？", isPresented: $showsCreateTodoAlert) {
-            Button("取消", role: .cancel) {}
-            Button("创建") {
-                Task {
-                    if await viewModel.createTodoPageIfNeeded() {
-                        showsTodos = true
-                    }
-                }
-            }
-        } message: {
-            Text("待办数据会保存在当前用户个人空间下的「\(ConfluenceClient.todoPageTitle)」页面。应用会尝试添加仅当前用户可见限制；如果服务器不支持限制接口，则沿用个人空间权限。")
-        }
     }
 }
 
@@ -487,48 +458,48 @@ struct WorkBentoTile: View {
     let subtitle: String
     let count: Int
     let systemImage: String
-    let tint: Color
-    var isProminent = false
+    let iconColor: Color
+    let gradient: [Color]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top) {
                 Image(systemName: systemImage)
                     .font(.system(size: 17, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(iconColor)
                     .frame(width: 34, height: 34)
-                    .background(tint, in: Circle())
+                    .background(Color.white.opacity(0.18), in: Circle())
 
                 Spacer()
 
                 Text("\(count)")
                     .font(.system(size: 30, weight: .bold))
-                    .foregroundStyle(isProminent ? .white : AtlassianTheme.text)
+                    .foregroundStyle(.white)
                     .contentTransition(.numericText())
             }
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
                     .font(appSettings.headlineFont)
-                    .foregroundStyle(isProminent ? .white : AtlassianTheme.text)
+                    .foregroundStyle(.white)
                 Text(subtitle)
                     .font(.caption)
-                    .foregroundStyle(isProminent ? .white.opacity(0.84) : AtlassianTheme.mutedText)
+                    .foregroundStyle(.white.opacity(0.82))
                     .lineLimit(1)
                     .minimumScaleFactor(0.82)
             }
         }
         .padding(16)
         .frame(maxWidth: .infinity, minHeight: 118, alignment: .leading)
-        .background(tileBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(
+            LinearGradient(colors: gradient, startPoint: .topLeading, endPoint: .bottomTrailing),
+            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+        )
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(isProminent ? Color.clear : AtlassianTheme.separator, lineWidth: 0.5)
+                .stroke(Color.white.opacity(0.18), lineWidth: 0.5)
         )
-    }
-
-    private var tileBackground: Color {
-        isProminent ? tint : AtlassianTheme.secondarySurface
+        .shadow(color: gradient.last?.opacity(0.20) ?? .clear, radius: 12, x: 0, y: 6)
     }
 }
 
@@ -587,9 +558,9 @@ struct TodoListView: View {
                 .padding(.vertical, 6)
             }
 
-            if let page = viewModel.todoPage, !page.todos.isEmpty {
+            if !viewModel.todos.isEmpty {
                 Section {
-                    ForEach(page.todos) { item in
+                    ForEach(viewModel.todos) { item in
                         Button {
                             Task { await viewModel.toggleTodo(item) }
                         } label: {
