@@ -186,6 +186,13 @@ struct FeedListView: View {
 
     var body: some View {
         List {
+            if viewModel.kind == .recent {
+                WorkBentoHeader()
+                    .listRowInsets(EdgeInsets(top: 14, leading: 20, bottom: 10, trailing: 20))
+                    .listRowBackground(AtlassianTheme.background)
+                    .listRowSeparator(.hidden)
+            }
+
             if viewModel.isLoading && viewModel.items.isEmpty {
                 loadingRow
             } else if let errorMessage = viewModel.errorMessage, viewModel.items.isEmpty {
@@ -292,6 +299,344 @@ struct FeedListView: View {
             .buttonStyle(.plain)
             .listRowBackground(AtlassianTheme.background)
         }
+    }
+}
+
+@MainActor
+final class WorkBentoViewModel: ObservableObject {
+    @Published private(set) var drafts: [ContentItem] = []
+    @Published private(set) var todoPage: TodoPage?
+    @Published private(set) var isLoading = false
+    @Published private(set) var isUpdatingTodos = false
+    @Published var errorMessage: String?
+
+    private var client: ConfluenceClient?
+    private var user: UserProfile?
+
+    var openTodoCount: Int {
+        todoPage?.todos.filter { !$0.isDone }.count ?? 0
+    }
+
+    func load(client: ConfluenceClient?, user: UserProfile?) async {
+        guard let client, let user else { return }
+        self.client = client
+        self.user = user
+        guard !isLoading else { return }
+
+        isLoading = true
+        errorMessage = nil
+        async let draftsTask = loadDrafts(client: client)
+        async let todoTask = loadTodoPage(client: client, user: user)
+        drafts = await draftsTask
+        todoPage = await todoTask
+        isLoading = false
+    }
+
+    func createTodoPageIfNeeded() async -> Bool {
+        if todoPage != nil { return true }
+        guard let client, let user else { return false }
+
+        isUpdatingTodos = true
+        errorMessage = nil
+        defer { isUpdatingTodos = false }
+
+        do {
+            todoPage = try await client.createTodoPage(for: user)
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    func addTodo(title: String) async {
+        let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty, let page = todoPage else { return }
+        var todos = page.todos
+        todos.insert(TodoItem(id: UUID().uuidString, title: cleaned, isDone: false), at: 0)
+        await saveTodos(todos, page: page)
+    }
+
+    func toggleTodo(_ item: TodoItem) async {
+        guard let page = todoPage else { return }
+        let todos = page.todos.map { current in
+            current.id == item.id ? TodoItem(id: current.id, title: current.title, isDone: !current.isDone) : current
+        }
+        await saveTodos(todos, page: page)
+    }
+
+    func deleteTodo(_ item: TodoItem) async {
+        guard let page = todoPage else { return }
+        await saveTodos(page.todos.filter { $0.id != item.id }, page: page)
+    }
+
+    private func saveTodos(_ todos: [TodoItem], page: TodoPage) async {
+        guard let client else { return }
+        isUpdatingTodos = true
+        errorMessage = nil
+        defer { isUpdatingTodos = false }
+
+        do {
+            todoPage = try await client.updateTodoPage(page, todos: todos)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func loadDrafts(client: ConfluenceClient) async -> [ContentItem] {
+        do {
+            return try await client.fetchDrafts()
+        } catch {
+            return []
+        }
+    }
+
+    private func loadTodoPage(client: ConfluenceClient, user: UserProfile) async -> TodoPage? {
+        do {
+            return try await client.fetchTodoPage(for: user)
+        } catch {
+            return nil
+        }
+    }
+}
+
+struct WorkBentoHeader: View {
+    @EnvironmentObject private var appSettings: AppSettings
+    @EnvironmentObject private var sessionStore: SessionStore
+    @StateObject private var viewModel = WorkBentoViewModel()
+    @State private var showsDrafts = false
+    @State private var showsTodos = false
+    @State private var showsCreateTodoAlert = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Button {
+                    showsDrafts = true
+                } label: {
+                    WorkBentoTile(
+                        title: "草稿箱",
+                        subtitle: "编辑中的页面",
+                        count: viewModel.drafts.count,
+                        systemImage: "doc.text.fill",
+                        tint: AtlassianTheme.blue
+                    )
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    if viewModel.todoPage == nil {
+                        showsCreateTodoAlert = true
+                    } else {
+                        showsTodos = true
+                    }
+                } label: {
+                    WorkBentoTile(
+                        title: "待办",
+                        subtitle: "私人任务列表",
+                        count: viewModel.openTodoCount,
+                        systemImage: "checkmark.circle.fill",
+                        tint: AtlassianTheme.red,
+                        isProminent: true
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+
+            if let errorMessage = viewModel.errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(AtlassianTheme.red)
+            }
+        }
+        .task {
+            await viewModel.load(client: sessionStore.client, user: sessionStore.user)
+        }
+        .refreshable {
+            await viewModel.load(client: sessionStore.client, user: sessionStore.user)
+        }
+        .sheet(isPresented: $showsDrafts) {
+            NavigationStack {
+                DraftInboxView(items: viewModel.drafts)
+            }
+        }
+        .sheet(isPresented: $showsTodos) {
+            NavigationStack {
+                TodoListView(viewModel: viewModel)
+            }
+        }
+        .alert("创建私人待办页？", isPresented: $showsCreateTodoAlert) {
+            Button("取消", role: .cancel) {}
+            Button("创建") {
+                Task {
+                    if await viewModel.createTodoPageIfNeeded() {
+                        showsTodos = true
+                    }
+                }
+            }
+        } message: {
+            Text("待办数据会保存在当前用户个人空间下的「\(ConfluenceClient.todoPageTitle)」页面，并设置为仅当前用户可见。")
+        }
+    }
+}
+
+struct WorkBentoTile: View {
+    @EnvironmentObject private var appSettings: AppSettings
+
+    let title: String
+    let subtitle: String
+    let count: Int
+    let systemImage: String
+    let tint: Color
+    var isProminent = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(tint, in: Circle())
+
+                Spacer()
+
+                Text("\(count)")
+                    .font(.system(size: 30, weight: .bold))
+                    .foregroundStyle(isProminent ? .white : AtlassianTheme.text)
+                    .contentTransition(.numericText())
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(appSettings.headlineFont)
+                    .foregroundStyle(isProminent ? .white : AtlassianTheme.text)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(isProminent ? .white.opacity(0.84) : AtlassianTheme.mutedText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, minHeight: 118, alignment: .leading)
+        .background(tileBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(isProminent ? Color.clear : AtlassianTheme.separator, lineWidth: 0.5)
+        )
+    }
+
+    private var tileBackground: Color {
+        isProminent ? tint : AtlassianTheme.secondarySurface
+    }
+}
+
+struct DraftInboxView: View {
+    let items: [ContentItem]
+
+    var body: some View {
+        List {
+            if items.isEmpty {
+                EmptyStateView(icon: "doc.text", title: "暂无草稿", message: "所有编辑中的页面会出现在这里")
+                    .listRowBackground(AtlassianTheme.background)
+                    .listRowSeparator(.hidden)
+            } else {
+                ForEach(items) { item in
+                    NavigationLink {
+                        ContentDetailView(item: item)
+                            .id(item.id)
+                    } label: {
+                        ContentRow(item: item)
+                    }
+                    .listRowBackground(AtlassianTheme.background)
+                }
+            }
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(AtlassianTheme.background)
+        .navigationTitle("草稿箱")
+        .inlineNavigationTitle()
+        .liquidNavigationChrome()
+    }
+}
+
+struct TodoListView: View {
+    @EnvironmentObject private var appSettings: AppSettings
+    @ObservedObject var viewModel: WorkBentoViewModel
+    @State private var newTodoTitle = ""
+
+    var body: some View {
+        List {
+            Section {
+                HStack(spacing: 10) {
+                    TextField("添加待办", text: $newTodoTitle)
+                        .textFieldStyle(.plain)
+                    Button {
+                        Task {
+                            await viewModel.addTodo(title: newTodoTitle)
+                            newTodoTitle = ""
+                        }
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 22))
+                    }
+                    .disabled(newTodoTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || viewModel.isUpdatingTodos)
+                }
+                .padding(.vertical, 6)
+            }
+
+            if let page = viewModel.todoPage, !page.todos.isEmpty {
+                Section {
+                    ForEach(page.todos) { item in
+                        Button {
+                            Task { await viewModel.toggleTodo(item) }
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: item.isDone ? "checkmark.circle.fill" : "circle")
+                                    .font(.system(size: 22, weight: .semibold))
+                                    .foregroundStyle(item.isDone ? AtlassianTheme.green : AtlassianTheme.mutedText)
+                                Text(item.title)
+                                    .font(appSettings.baseFont)
+                                    .foregroundStyle(item.isDone ? AtlassianTheme.mutedText : AtlassianTheme.text)
+                                    .strikethrough(item.isDone)
+                                Spacer()
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .swipeActions {
+                            Button(role: .destructive) {
+                                Task { await viewModel.deleteTodo(item) }
+                            } label: {
+                                Label("删除", systemImage: "trash")
+                            }
+                        }
+                    }
+                }
+            } else {
+                EmptyStateView(icon: "checkmark.circle", title: "暂无待办", message: "把需要跟进的知识库事项放在这里")
+                    .listRowBackground(AtlassianTheme.background)
+                    .listRowSeparator(.hidden)
+            }
+
+            if viewModel.isUpdatingTodos {
+                HStack {
+                    Spacer()
+                    ProgressView()
+                        .tint(AtlassianTheme.blue)
+                    Spacer()
+                }
+                .listRowBackground(AtlassianTheme.background)
+                .listRowSeparator(.hidden)
+            }
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(AtlassianTheme.groupedBackground)
+        .navigationTitle("待办")
+        .inlineNavigationTitle()
+        .liquidNavigationChrome()
     }
 }
 

@@ -156,6 +156,7 @@ struct ContentSearchResult: Decodable {
     let space: ConfluenceSpace?
     let history: ContentHistory?
     let body: ContentBody?
+    let version: ContentVersion?
     let links: Links?
 
     enum CodingKeys: String, CodingKey {
@@ -166,6 +167,7 @@ struct ContentSearchResult: Decodable {
         case space
         case history
         case body
+        case version
         case links = "_links"
     }
 
@@ -191,6 +193,18 @@ struct ContentSearchResult: Decodable {
             excerpt: fullText?.limited(to: 160),
             searchableText: fullText,
             origin: origin
+        )
+    }
+
+    func detail() -> ContentDetail {
+        ContentDetail(
+            id: id,
+            type: type,
+            title: title,
+            space: space,
+            body: body,
+            version: version,
+            links: links
         )
     }
 }
@@ -410,6 +424,63 @@ struct AdminSystemInfo: Equatable {
     let rawSystemInfo: [String: String]
 }
 
+struct TodoItem: Identifiable, Codable, Equatable {
+    var id: String
+    var title: String
+    var isDone: Bool
+}
+
+struct TodoPage {
+    let detail: ContentDetail
+    let todos: [TodoItem]
+
+    init(detail: ContentDetail) {
+        self.detail = detail
+        self.todos = Self.parseTodos(from: detail.storageHTML ?? detail.renderedHTML)
+    }
+
+    static func storageHTML(for todos: [TodoItem]) -> String {
+        let rows = todos.map { item in
+            "<li data-id=\"\(item.id.htmlAttributeEscaped())\" data-done=\"\(item.isDone ? "true" : "false")\">\(item.title.htmlEscaped())</li>"
+        }
+        .joined()
+
+        return """
+        <p><strong>Confluence Hot 待办</strong></p>
+        <p>这个页面由 Confluence Hot iOS 维护，用于保存当前账号的私人待办列表。</p>
+        <ul data-confluence-hot-todos="true">\(rows)</ul>
+        """
+    }
+
+    private static func parseTodos(from html: String) -> [TodoItem] {
+        let pattern = #"<li\b([^>]*)>(.*?)</li>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else { return [] }
+        let nsRange = NSRange(html.startIndex..<html.endIndex, in: html)
+        return regex.matches(in: html, options: [], range: nsRange).compactMap { match in
+            guard match.numberOfRanges > 2,
+                  let attributesRange = Range(match.range(at: 1), in: html),
+                  let bodyRange = Range(match.range(at: 2), in: html) else { return nil }
+
+            let attributes = String(html[attributesRange])
+            let title = String(html[bodyRange]).strippedHTMLText()
+            guard !title.isEmpty else { return nil }
+            let id = Self.attribute("data-id", in: attributes) ?? UUID().uuidString
+            let doneText = Self.attribute("data-done", in: attributes) ?? "false"
+            return TodoItem(id: id, title: title, isDone: doneText == "true")
+        }
+    }
+
+    private static func attribute(_ name: String, in attributes: String) -> String? {
+        let pattern = #"\#(name)\s*=\s*["']([^"']+)["']"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let nsRange = NSRange(attributes.startIndex..<attributes.endIndex, in: attributes)
+        guard let match = regex.firstMatch(in: attributes, options: [], range: nsRange),
+              match.numberOfRanges > 1,
+              let range = Range(match.range(at: 1), in: attributes) else { return nil }
+        return String(attributes[range])
+    }
+}
+
 struct GenericCountResponse: Decodable {
     let size: Int?
     let totalSize: Int?
@@ -540,5 +611,16 @@ private extension String {
     func limited(to maxLength: Int) -> String {
         guard count > maxLength else { return self }
         return String(prefix(maxLength)) + "..."
+    }
+
+    func htmlEscaped() -> String {
+        replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+    }
+
+    func htmlAttributeEscaped() -> String {
+        htmlEscaped()
     }
 }

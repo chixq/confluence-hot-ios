@@ -1,6 +1,8 @@
 import Foundation
 
 final class ConfluenceClient {
+    static let todoPageTitle = "Confluence Hot 待办"
+
     private let configuration: ServerConfiguration
     private let password: String
     private let session: URLSession
@@ -51,6 +53,18 @@ final class ConfluenceClient {
         }
     }
 
+    func fetchDrafts(limit: Int = 50) async throws -> [ContentItem] {
+        let response: ContentSearchResponse = try await request(
+            "/rest/api/content/search",
+            queryItems: [
+                URLQueryItem(name: "cql", value: "type in (page,blogpost) and status = draft order by lastmodified desc"),
+                URLQueryItem(name: "limit", value: String(limit)),
+                URLQueryItem(name: "expand", value: "space,history.createdBy,history.lastUpdated")
+            ]
+        )
+        return response.results.map { $0.item(origin: .recent) }
+    }
+
     func fetchPopular(start: Int = 0, limit: Int = 30, cachePolicy: ConfluenceCachePolicy = .useCache) async throws -> [ContentItem] {
         let cacheKey = ConfluenceContentListCacheKey.popular(start: start, limit: limit)
         if cachePolicy.allowsFreshRead,
@@ -82,6 +96,44 @@ final class ConfluenceClient {
         }
 
         return try await fetchRecentlyUpdated(start: start, limit: limit, cachePolicy: cachePolicy)
+    }
+
+    func fetchTodoPage(for user: UserProfile) async throws -> TodoPage? {
+        let spaceKey = try await personalSpaceKey(for: user)
+        let escapedSpace = Self.escapeCQL(spaceKey)
+        let escapedTitle = Self.escapeCQL(Self.todoPageTitle)
+        let response: ContentSearchResponse = try await request(
+            "/rest/api/content/search",
+            queryItems: [
+                URLQueryItem(name: "cql", value: "space = \"\(escapedSpace)\" and type = page and title = \"\(escapedTitle)\" order by lastmodified desc"),
+                URLQueryItem(name: "limit", value: "1"),
+                URLQueryItem(name: "expand", value: "body.view,body.storage,space,version")
+            ]
+        )
+        guard let detail = response.results.first?.detail() else { return nil }
+        return TodoPage(detail: detail)
+    }
+
+    func createTodoPage(for user: UserProfile) async throws -> TodoPage {
+        let spaceKey = try await personalSpaceKey(for: user)
+        let detail = try await createPage(
+            title: Self.todoPageTitle,
+            spaceKey: spaceKey,
+            storageHTML: TodoPage.storageHTML(for: [])
+        )
+        try await applyPrivateRestrictions(contentID: detail.id, user: user)
+        return TodoPage(detail: detail)
+    }
+
+    func updateTodoPage(_ page: TodoPage, todos: [TodoItem]) async throws -> TodoPage {
+        let updated = try await updateContent(
+            id: page.detail.id,
+            type: page.detail.type,
+            title: page.detail.title,
+            storageHTML: TodoPage.storageHTML(for: todos),
+            versionNumber: page.detail.nextVersionNumber
+        )
+        return TodoPage(detail: updated)
     }
 
     func fetchSpaces(start: Int = 0, limit: Int = 50, cachePolicy: ConfluenceCachePolicy = .useCache) async throws -> [ConfluenceSpace] {
@@ -300,6 +352,23 @@ final class ConfluenceClient {
         return copied
     }
 
+    func createPage(title: String, spaceKey: String, storageHTML: String) async throws -> ContentDetail {
+        let body = CreateContentRequest(
+            type: "page",
+            title: title,
+            space: SpaceKeyRequest(key: spaceKey),
+            body: StorageBody(storage: StorageRepresentation(value: storageHTML, representation: "storage"))
+        )
+        let detail: ContentDetail = try await request(
+            "/rest/api/content",
+            method: "POST",
+            queryItems: [URLQueryItem(name: "expand", value: "body.view,body.storage,space,version")],
+            body: body
+        )
+        await cacheStore.storeContentDetail(detail)
+        return detail
+    }
+
     func deleteContent(id: String) async throws {
         try await requestVoid("/rest/api/content/\(id)", method: "DELETE")
         await cacheStore.removeContent(id: id)
@@ -448,6 +517,31 @@ final class ConfluenceClient {
         }
     }
 
+    private func requestVoid<Body: Encodable>(
+        _ path: String,
+        method: String,
+        queryItems: [URLQueryItem] = [],
+        body: Body
+    ) async throws {
+        let url = try makeURL(path: path, queryItems: queryItems)
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("ConfluenceHot-iOS", forHTTPHeaderField: "User-Agent")
+        request.setValue(basicAuthHeader(), forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONEncoder().encode(body)
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw ConfluenceClientError.invalidResponse
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            let message = String(data: data, encoding: .utf8)
+            throw ConfluenceClientError.httpStatus(httpResponse.statusCode, message)
+        }
+    }
+
     private func fetchSearchItems(cql: String, start: Int, limit: Int) async throws -> [ContentItem] {
         let response: ContentSearchResponse = try await request(
             "/rest/api/content/search",
@@ -493,6 +587,40 @@ final class ConfluenceClient {
         }
 
         return output
+    }
+
+    private func personalSpaceKey(for user: UserProfile) async throws -> String {
+        let candidates = [
+            user.username,
+            configuration.username,
+            user.userKey
+        ]
+        .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+
+        for value in candidates {
+            let key = value.hasPrefix("~") ? value : "~\(value)"
+            do {
+                let space: ConfluenceSpace = try await request("/rest/api/space/\(key)")
+                return space.key
+            } catch {
+                continue
+            }
+        }
+
+        throw ConfluenceClientError.missingPersonalSpace
+    }
+
+    private func applyPrivateRestrictions(contentID: String, user: UserProfile) async throws {
+        let subject = RestrictionUser(
+            type: user.type ?? "known",
+            username: user.username ?? configuration.username,
+            userKey: user.userKey,
+            displayName: user.displayName
+        )
+        let body = RestrictionUpdateRequest(restrictions: OperationRestrictions(user: [subject], group: []))
+        try await requestVoid("/rest/api/content/\(contentID)/restriction/byOperation/read", method: "PUT", body: body)
+        try await requestVoid("/rest/api/content/\(contentID)/restriction/byOperation/update", method: "PUT", body: body)
     }
 
     private func fetchUserCount() async -> Int? {
@@ -669,6 +797,22 @@ private struct CreateContentRequest: Encodable {
     let body: StorageBody
 }
 
+private struct RestrictionUpdateRequest: Encodable {
+    let restrictions: OperationRestrictions
+}
+
+private struct OperationRestrictions: Encodable {
+    let user: [RestrictionUser]
+    let group: [String]
+}
+
+private struct RestrictionUser: Encodable {
+    let type: String
+    let username: String?
+    let userKey: String?
+    let displayName: String?
+}
+
 private struct ContentVersionRequest: Encodable {
     let number: Int
 }
@@ -703,6 +847,7 @@ enum ConfluenceClientError: LocalizedError, Equatable {
     case emptyComment
     case missingStorageBody
     case missingSpace
+    case missingPersonalSpace
 
     var errorDescription: String? {
         switch self {
@@ -728,6 +873,8 @@ enum ConfluenceClientError: LocalizedError, Equatable {
             return "当前文章缺少可编辑正文"
         case .missingSpace:
             return "当前文章缺少空间信息，无法复制"
+        case .missingPersonalSpace:
+            return "没有找到当前用户的个人空间，无法创建私人待办页"
         }
     }
 }
