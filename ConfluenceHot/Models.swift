@@ -36,7 +36,7 @@ struct ServerConfiguration: Codable, Equatable {
     }
 }
 
-struct UserProfile: Decodable, Equatable {
+struct UserProfile: Codable, Equatable {
     let type: String?
     let username: String?
     let userKey: String?
@@ -58,14 +58,14 @@ struct UserProfile: Decodable, Equatable {
     }
 }
 
-struct ProfilePicture: Decodable, Equatable {
+struct ProfilePicture: Codable, Equatable {
     let path: String?
     let width: Int?
     let height: Int?
     let isDefault: Bool?
 }
 
-struct Links: Decodable, Equatable {
+struct Links: Codable, Equatable {
     let base: String?
     let context: String?
     let selfLink: String?
@@ -81,8 +81,8 @@ struct Links: Decodable, Equatable {
     }
 }
 
-struct ContentItem: Identifiable, Equatable {
-    enum Origin: Equatable {
+struct ContentItem: Identifiable, Codable, Equatable {
+    enum Origin: String, Codable, Equatable {
         case recent
         case popular
         case search
@@ -195,14 +195,14 @@ struct ContentSearchResult: Decodable {
     }
 }
 
-struct ContentHistory: Decodable {
+struct ContentHistory: Codable {
     let latest: Bool?
     let createdBy: UserSummary?
     let createdDate: String?
     let lastUpdated: ContentVersion?
 }
 
-struct ContentVersion: Decodable {
+struct ContentVersion: Codable {
     let by: UserSummary?
     let when: String?
     let friendlyWhen: String?
@@ -210,7 +210,7 @@ struct ContentVersion: Decodable {
     let message: String?
 }
 
-struct UserSummary: Decodable, Equatable {
+struct UserSummary: Codable, Equatable {
     let type: String?
     let username: String?
     let userKey: String?
@@ -218,7 +218,7 @@ struct UserSummary: Decodable, Equatable {
     let profilePicture: ProfilePicture?
 }
 
-struct ConfluenceSpace: Decodable, Identifiable, Equatable {
+struct ConfluenceSpace: Codable, Identifiable, Equatable {
     let id: Int?
     let key: String
     let name: String
@@ -296,7 +296,7 @@ struct PopularAuthor: Decodable {
     let avatarUrl: String?
 }
 
-struct ContentDetail: Decodable {
+struct ContentDetail: Codable {
     let id: String
     let type: String
     let title: String
@@ -328,12 +328,12 @@ struct ContentDetail: Decodable {
     }
 }
 
-struct ContentBody: Decodable {
+struct ContentBody: Codable {
     let view: BodyRepresentation?
     let storage: BodyRepresentation?
 }
 
-struct BodyRepresentation: Decodable {
+struct BodyRepresentation: Codable {
     let value: String
     let representation: String?
 }
@@ -378,7 +378,7 @@ struct CommentResult: Decodable {
     }
 }
 
-struct CommentItem: Identifiable, Equatable {
+struct CommentItem: Identifiable, Codable, Equatable {
     let id: String
     let authorName: String
     let authorAvatarPath: String?

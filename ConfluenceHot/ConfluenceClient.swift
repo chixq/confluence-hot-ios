@@ -4,12 +4,14 @@ final class ConfluenceClient {
     private let configuration: ServerConfiguration
     private let password: String
     private let session: URLSession
+    private let cacheStore: ConfluenceCacheStore
     private let decoder = JSONDecoder()
 
-    init(configuration: ServerConfiguration, password: String, session: URLSession = .shared) {
+    init(configuration: ServerConfiguration, password: String, session: URLSession = .shared, cacheStore: ConfluenceCacheStore? = nil) {
         self.configuration = configuration
         self.password = password
         self.session = session
+        self.cacheStore = cacheStore ?? ConfluenceCacheStore(configuration: configuration)
     }
 
     var baseURL: URL {
@@ -20,20 +22,42 @@ final class ConfluenceClient {
         try await request("/rest/api/user/current")
     }
 
-    func fetchRecentlyUpdated(start: Int = 0, limit: Int = 30) async throws -> [ContentItem] {
-        let response: ContentSearchResponse = try await request(
-            "/rest/api/content/search",
-            queryItems: [
-                URLQueryItem(name: "cql", value: "type in (page,blogpost) order by lastmodified desc"),
-                URLQueryItem(name: "start", value: String(start)),
-                URLQueryItem(name: "limit", value: String(limit)),
-                URLQueryItem(name: "expand", value: "space,history.lastUpdated")
-            ]
-        )
-        return response.results.map { $0.item(origin: .recent) }
+    func fetchRecentlyUpdated(start: Int = 0, limit: Int = 30, cachePolicy: ConfluenceCachePolicy = .useCache) async throws -> [ContentItem] {
+        let cacheKey = ConfluenceContentListCacheKey.recent(start: start, limit: limit)
+        if cachePolicy.allowsFreshRead,
+           let cached = await cacheStore.cachedContentList(for: cacheKey) {
+            return cached
+        }
+
+        do {
+            let response: ContentSearchResponse = try await request(
+                "/rest/api/content/search",
+                queryItems: [
+                    URLQueryItem(name: "cql", value: "type in (page,blogpost) order by lastmodified desc"),
+                    URLQueryItem(name: "start", value: String(start)),
+                    URLQueryItem(name: "limit", value: String(limit)),
+                    URLQueryItem(name: "expand", value: "space,history.lastUpdated")
+                ]
+            )
+            let items = response.results.map { $0.item(origin: .recent) }
+            await cacheStore.storeContentList(items, for: cacheKey)
+            return items
+        } catch {
+            if cachePolicy.allowsStaleFallback,
+               let cached = await cacheStore.cachedContentList(for: cacheKey, maxAge: nil) {
+                return cached
+            }
+            throw error
+        }
     }
 
-    func fetchPopular(start: Int = 0, limit: Int = 30) async throws -> [ContentItem] {
+    func fetchPopular(start: Int = 0, limit: Int = 30, cachePolicy: ConfluenceCachePolicy = .useCache) async throws -> [ContentItem] {
+        let cacheKey = ConfluenceContentListCacheKey.popular(start: start, limit: limit)
+        if cachePolicy.allowsFreshRead,
+           let cached = await cacheStore.cachedContentList(for: cacheKey) {
+            return cached
+        }
+
         do {
             let response: PopularStreamResponse = try await request(
                 "/rest/popular/1/stream/content",
@@ -44,87 +68,172 @@ final class ConfluenceClient {
             )
             let items = response.streamItems.map { $0.item() }
             if !items.isEmpty {
+                await cacheStore.storeContentList(items, for: cacheKey)
                 return items
             }
         } catch ConfluenceClientError.unauthorized {
             throw ConfluenceClientError.unauthorized
         } catch {
+            if cachePolicy.allowsStaleFallback,
+               let cached = await cacheStore.cachedContentList(for: cacheKey, maxAge: nil) {
+                return cached
+            }
             // Some Server/Data Center installations disable the popular stream plugin.
         }
 
-        return try await fetchRecentlyUpdated(start: start, limit: limit)
+        return try await fetchRecentlyUpdated(start: start, limit: limit, cachePolicy: cachePolicy)
     }
 
-    func fetchSpaces(start: Int = 0, limit: Int = 50) async throws -> [ConfluenceSpace] {
-        let response: SpaceResponse = try await request(
-            "/rest/api/space",
-            queryItems: [
-                URLQueryItem(name: "start", value: String(start)),
-                URLQueryItem(name: "limit", value: String(limit)),
-                URLQueryItem(name: "type", value: "global")
-            ]
-        )
-        return response.results
+    func fetchSpaces(start: Int = 0, limit: Int = 50, cachePolicy: ConfluenceCachePolicy = .useCache) async throws -> [ConfluenceSpace] {
+        if cachePolicy.allowsFreshRead,
+           let cached = await cacheStore.cachedSpaces(start: start, limit: limit) {
+            return cached
+        }
+
+        do {
+            let response: SpaceResponse = try await request(
+                "/rest/api/space",
+                queryItems: [
+                    URLQueryItem(name: "start", value: String(start)),
+                    URLQueryItem(name: "limit", value: String(limit)),
+                    URLQueryItem(name: "type", value: "global")
+                ]
+            )
+            await cacheStore.storeSpaces(response.results, start: start, limit: limit)
+            return response.results
+        } catch {
+            if cachePolicy.allowsStaleFallback,
+               let cached = await cacheStore.cachedSpaces(start: start, limit: limit, maxAge: nil) {
+                return cached
+            }
+            throw error
+        }
     }
 
-    func fetchSpaceContent(spaceKey: String, start: Int = 0, limit: Int = 30) async throws -> [ContentItem] {
-        let escapedKey = Self.escapeCQL(spaceKey)
-        let response: ContentSearchResponse = try await request(
-            "/rest/api/content/search",
-            queryItems: [
-                URLQueryItem(name: "cql", value: "space = \"\(escapedKey)\" and type in (page,blogpost) order by lastmodified desc"),
-                URLQueryItem(name: "start", value: String(start)),
-                URLQueryItem(name: "limit", value: String(limit)),
-                URLQueryItem(name: "expand", value: "space,history.lastUpdated")
-            ]
-        )
-        return response.results.map { $0.item(origin: .search) }
+    func fetchSpaceContent(spaceKey: String, start: Int = 0, limit: Int = 30, cachePolicy: ConfluenceCachePolicy = .useCache) async throws -> [ContentItem] {
+        let cacheKey = ConfluenceContentListCacheKey.space(spaceKey: spaceKey, start: start, limit: limit)
+        if cachePolicy.allowsFreshRead,
+           let cached = await cacheStore.cachedContentList(for: cacheKey) {
+            return cached
+        }
+
+        do {
+            let escapedKey = Self.escapeCQL(spaceKey)
+            let response: ContentSearchResponse = try await request(
+                "/rest/api/content/search",
+                queryItems: [
+                    URLQueryItem(name: "cql", value: "space = \"\(escapedKey)\" and type in (page,blogpost) order by lastmodified desc"),
+                    URLQueryItem(name: "start", value: String(start)),
+                    URLQueryItem(name: "limit", value: String(limit)),
+                    URLQueryItem(name: "expand", value: "space,history.lastUpdated")
+                ]
+            )
+            let items = response.results.map { $0.item(origin: .search) }
+            await cacheStore.storeContentList(items, for: cacheKey)
+            return items
+        } catch {
+            if cachePolicy.allowsStaleFallback,
+               let cached = await cacheStore.cachedContentList(for: cacheKey, maxAge: nil) {
+                return cached
+            }
+            throw error
+        }
     }
 
-    func search(_ query: String, limit: Int = 30) async throws -> [ContentItem] {
-        try await searchContent(contentQuery: query, authorQuery: "", start: 0, limit: limit)
+    func search(_ query: String, limit: Int = 30, cachePolicy: ConfluenceCachePolicy = .useCache) async throws -> [ContentItem] {
+        try await searchContent(contentQuery: query, authorQuery: "", start: 0, limit: limit, cachePolicy: cachePolicy)
     }
 
-    func searchContent(contentQuery: String, authorQuery: String, start: Int = 0, limit: Int = 30) async throws -> [ContentItem] {
+    func searchContent(contentQuery: String, authorQuery: String, start: Int = 0, limit: Int = 30, cachePolicy: ConfluenceCachePolicy = .useCache) async throws -> [ContentItem] {
         let cleaned = contentQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedAuthor = authorQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty || !cleanedAuthor.isEmpty else {
-            return try await fetchRecentlyUpdated(start: start, limit: limit)
+            return try await fetchRecentlyUpdated(start: start, limit: limit, cachePolicy: cachePolicy)
         }
 
-        if !cleanedAuthor.isEmpty {
-            return try await searchContentWithAuthorFilter(contentQuery: cleaned, authorQuery: cleanedAuthor, start: start, limit: limit)
+        let cacheKey = ConfluenceContentListCacheKey.search(contentQuery: cleaned, authorQuery: cleanedAuthor, start: start, limit: limit)
+        if cachePolicy.allowsFreshRead,
+           let cached = await cacheStore.cachedContentList(for: cacheKey) {
+            return cached
+        }
+
+        do {
+            let items = try await searchContentFromNetwork(contentQuery: cleaned, authorQuery: cleanedAuthor, start: start, limit: limit)
+            await cacheStore.storeContentList(items, for: cacheKey)
+            return items
+        } catch {
+            if cachePolicy.allowsStaleFallback,
+               let cached = await cacheStore.cachedContentList(for: cacheKey, maxAge: nil) {
+                return cached
+            }
+            throw error
+        }
+    }
+
+    private func searchContentFromNetwork(contentQuery: String, authorQuery: String, start: Int, limit: Int) async throws -> [ContentItem] {
+        if !authorQuery.isEmpty {
+            return try await searchContentWithAuthorFilter(contentQuery: contentQuery, authorQuery: authorQuery, start: start, limit: limit)
         }
 
         var filters = ["type in (page,blogpost)"]
-        if !cleaned.isEmpty {
-            let escaped = Self.escapeCQL(cleaned)
+        if !contentQuery.isEmpty {
+            let escaped = Self.escapeCQL(contentQuery)
             filters.append("(title ~ \"\(escaped)\" or text ~ \"\(escaped)\")")
         }
 
         let cql = "\(filters.joined(separator: " and ")) order by lastmodified desc"
         return try await fetchSearchItems(cql: cql, start: start, limit: limit)
-            .filter { Self.matchesContent($0, query: cleaned) }
+            .filter { Self.matchesContent($0, query: contentQuery) }
     }
 
-    func fetchDetail(id: String) async throws -> ContentDetail {
-        try await request(
-            "/rest/api/content/\(id)",
-            queryItems: [
-                URLQueryItem(name: "expand", value: "body.view,body.storage,space,version")
-            ]
-        )
+    func fetchDetail(id: String, cachePolicy: ConfluenceCachePolicy = .useCache) async throws -> ContentDetail {
+        if cachePolicy.allowsFreshRead,
+           let cached = await cacheStore.cachedContentDetail(id: id) {
+            return cached
+        }
+
+        do {
+            let detail: ContentDetail = try await request(
+                "/rest/api/content/\(id)",
+                queryItems: [
+                    URLQueryItem(name: "expand", value: "body.view,body.storage,space,version")
+                ]
+            )
+            await cacheStore.storeContentDetail(detail)
+            return detail
+        } catch {
+            if cachePolicy.allowsStaleFallback,
+               let cached = await cacheStore.cachedContentDetail(id: id, maxAge: nil) {
+                return cached
+            }
+            throw error
+        }
     }
 
-    func fetchComments(contentID: String, limit: Int = 50) async throws -> [CommentItem] {
-        let response: CommentResponse = try await request(
-            "/rest/api/content/\(contentID)/child/comment",
-            queryItems: [
-                URLQueryItem(name: "limit", value: String(limit)),
-                URLQueryItem(name: "expand", value: "body.view,history.createdBy,version")
-            ]
-        )
-        return response.results.map { $0.item() }
+    func fetchComments(contentID: String, limit: Int = 50, cachePolicy: ConfluenceCachePolicy = .useCache) async throws -> [CommentItem] {
+        if cachePolicy.allowsFreshRead,
+           let cached = await cacheStore.cachedComments(contentID: contentID, limit: limit) {
+            return cached
+        }
+
+        do {
+            let response: CommentResponse = try await request(
+                "/rest/api/content/\(contentID)/child/comment",
+                queryItems: [
+                    URLQueryItem(name: "limit", value: String(limit)),
+                    URLQueryItem(name: "expand", value: "body.view,history.createdBy,version")
+                ]
+            )
+            let comments = response.results.map { $0.item() }
+            await cacheStore.storeComments(comments, contentID: contentID, limit: limit)
+            return comments
+        } catch {
+            if cachePolicy.allowsStaleFallback,
+               let cached = await cacheStore.cachedComments(contentID: contentID, limit: limit, maxAge: nil) {
+                return cached
+            }
+            throw error
+        }
     }
 
     func postComment(contentID: String, containerType: String, text: String) async throws -> CommentItem {
@@ -145,6 +254,7 @@ final class ConfluenceClient {
             queryItems: [URLQueryItem(name: "expand", value: "body.view,history.createdBy,version")],
             body: requestBody
         )
+        await cacheStore.invalidateComments(contentID: contentID)
         return result.item()
     }
 
@@ -156,12 +266,15 @@ final class ConfluenceClient {
             version: ContentVersionRequest(number: versionNumber),
             body: StorageBody(storage: StorageRepresentation(value: storageHTML, representation: "storage"))
         )
-        return try await request(
+        let updated: ContentDetail = try await request(
             "/rest/api/content/\(id)",
             method: "PUT",
             queryItems: [URLQueryItem(name: "expand", value: "body.view,body.storage,space,version")],
             body: body
         )
+        await cacheStore.storeContentDetail(updated)
+        await cacheStore.invalidateContentLists(containingContentID: id)
+        return updated
     }
 
     func copyContent(detail: ContentDetail) async throws -> ContentDetail {
@@ -177,31 +290,49 @@ final class ConfluenceClient {
             space: SpaceKeyRequest(key: spaceKey),
             body: StorageBody(storage: StorageRepresentation(value: storageHTML, representation: "storage"))
         )
-        return try await request(
+        let copied: ContentDetail = try await request(
             "/rest/api/content",
             method: "POST",
             queryItems: [URLQueryItem(name: "expand", value: "body.view,body.storage,space,version")],
             body: body
         )
+        await cacheStore.storeContentDetail(copied)
+        return copied
     }
 
     func deleteContent(id: String) async throws {
         try await requestVoid("/rest/api/content/\(id)", method: "DELETE")
+        await cacheStore.removeContent(id: id)
     }
 
-    func fetchData(url: URL) async throws -> (data: Data, mimeType: String) {
+    func fetchData(url: URL, cachePolicy: ConfluenceCachePolicy = .useCache) async throws -> (data: Data, mimeType: String) {
+        if cachePolicy.allowsFreshRead,
+           let cached = await cacheStore.cachedData(for: url) {
+            return cached
+        }
+
         var request = URLRequest(url: url)
         request.setValue("ConfluenceHot-iOS", forHTTPHeaderField: "User-Agent")
         request.setValue(basicAuthHeader(), forHTTPHeaderField: "Authorization")
-        let (data, response) = try await session.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw ConfluenceClientError.invalidResponse
+
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw ConfluenceClientError.invalidResponse
+            }
+            guard (200..<300).contains(httpResponse.statusCode) else {
+                throw ConfluenceClientError.httpStatus(httpResponse.statusCode, nil)
+            }
+            let mimeType = httpResponse.value(forHTTPHeaderField: "Content-Type")?.components(separatedBy: ";").first ?? Self.mimeType(for: url)
+            await cacheStore.storeData(data, mimeType: mimeType, for: url)
+            return (data, mimeType)
+        } catch {
+            if cachePolicy.allowsStaleFallback,
+               let cached = await cacheStore.cachedData(for: url, maxAge: nil) {
+                return cached
+            }
+            throw error
         }
-        guard (200..<300).contains(httpResponse.statusCode) else {
-            throw ConfluenceClientError.httpStatus(httpResponse.statusCode, nil)
-        }
-        let mimeType = httpResponse.value(forHTTPHeaderField: "Content-Type")?.components(separatedBy: ";").first ?? Self.mimeType(for: url)
-        return (data, mimeType)
     }
 
     func inlineAuthenticatedImages(in html: String, baseURL: URL?) async -> String {

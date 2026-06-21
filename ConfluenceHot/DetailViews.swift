@@ -234,7 +234,7 @@ struct ContentDetailView: View {
         commentsErrorMessage = nil
 
         do {
-            comments = try await client.fetchComments(contentID: item.id)
+            comments = try await client.fetchComments(contentID: item.id, cachePolicy: .reloadIgnoringCache)
         } catch {
             commentsErrorMessage = error.localizedDescription
         }

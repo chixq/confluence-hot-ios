@@ -67,7 +67,7 @@ final class ContentFeedViewModel: ObservableObject {
         hasMore = true
 
         do {
-            let page = try await fetchPage(client: client, start: nextStart)
+            let page = try await fetchPage(client: client, start: nextStart, cachePolicy: force ? .reloadIgnoringCache : .useCache)
             items = page
             nextStart = page.count
             hasMore = page.count >= pageSize
@@ -105,12 +105,12 @@ final class ContentFeedViewModel: ObservableObject {
         }
     }
 
-    private func fetchPage(client: ConfluenceClient, start: Int) async throws -> [ContentItem] {
+    private func fetchPage(client: ConfluenceClient, start: Int, cachePolicy: ConfluenceCachePolicy = .useCache) async throws -> [ContentItem] {
         switch kind {
         case .recent:
-            return try await client.fetchRecentlyUpdated(start: start, limit: pageSize)
+            return try await client.fetchRecentlyUpdated(start: start, limit: pageSize, cachePolicy: cachePolicy)
         case .popular:
-            return try await client.fetchPopular(start: start, limit: pageSize)
+            return try await client.fetchPopular(start: start, limit: pageSize, cachePolicy: cachePolicy)
         }
     }
 }
@@ -633,7 +633,7 @@ final class SpacesViewModel: ObservableObject {
         hasMore = true
 
         do {
-            let page = try await client.fetchSpaces(start: nextStart, limit: pageSize)
+            let page = try await client.fetchSpaces(start: nextStart, limit: pageSize, cachePolicy: force ? .reloadIgnoringCache : .useCache)
             spaces = page
             nextStart = page.count
             hasMore = page.count >= pageSize
@@ -789,7 +789,7 @@ final class SpaceContentViewModel: ObservableObject {
         hasMore = true
 
         do {
-            let page = try await client.fetchSpaceContent(spaceKey: space.key, start: nextStart, limit: pageSize)
+            let page = try await client.fetchSpaceContent(spaceKey: space.key, start: nextStart, limit: pageSize, cachePolicy: force ? .reloadIgnoringCache : .useCache)
             items = page
             nextStart = page.count
             hasMore = page.count >= pageSize
