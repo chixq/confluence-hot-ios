@@ -120,11 +120,13 @@ struct AdaptiveFeedView: View {
     @EnvironmentObject private var sessionStore: SessionStore
 
     let kind: FeedKind
+    let refreshToken: Int
     @StateObject private var viewModel: ContentFeedViewModel
     @State private var selectedItem: ContentItem?
 
-    init(kind: FeedKind) {
+    init(kind: FeedKind, refreshToken: Int = 0) {
         self.kind = kind
+        self.refreshToken = refreshToken
         _viewModel = StateObject(wrappedValue: ContentFeedViewModel(kind: kind))
     }
 
@@ -136,7 +138,7 @@ struct AdaptiveFeedView: View {
             Group {
                 if shouldUseSplit {
                     NavigationSplitView {
-                        FeedListView(viewModel: viewModel, selectedItem: $selectedItem, compactNavigation: false)
+                        FeedListView(viewModel: viewModel, selectedItem: $selectedItem, compactNavigation: false, refreshToken: refreshToken)
                             .navigationTitle(kind.title)
                             .liquidNavigationChrome()
                     } detail: {
@@ -149,7 +151,7 @@ struct AdaptiveFeedView: View {
                         }
                     }
                     .task {
-                        await viewModel.load(client: sessionStore.client)
+                        await viewModel.load(client: sessionStore.client, force: refreshToken > 0)
                         reconcileSelection()
                     }
                     .onReceive(viewModel.$items) { _ in
@@ -157,7 +159,7 @@ struct AdaptiveFeedView: View {
                     }
                 } else {
                     NavigationStack {
-                        FeedListView(viewModel: viewModel, selectedItem: $selectedItem, compactNavigation: true)
+                        FeedListView(viewModel: viewModel, selectedItem: $selectedItem, compactNavigation: true, refreshToken: refreshToken)
                             .navigationTitle(kind.title)
                             .liquidNavigationChrome()
                     }
@@ -183,6 +185,7 @@ struct FeedListView: View {
     @ObservedObject var viewModel: ContentFeedViewModel
     @Binding var selectedItem: ContentItem?
     let compactNavigation: Bool
+    let refreshToken: Int
 
     var body: some View {
         List {
@@ -264,7 +267,7 @@ struct FeedListView: View {
             await viewModel.load(client: sessionStore.client, force: true)
         }
         .task {
-            await viewModel.load(client: sessionStore.client)
+            await viewModel.load(client: sessionStore.client, force: refreshToken > 0)
         }
     }
 
@@ -304,7 +307,8 @@ struct FeedListView: View {
 
 @MainActor
 final class WorkBentoViewModel: ObservableObject {
-    @Published private(set) var drafts: [ContentItem] = []
+    @Published private(set) var remoteDrafts: [ContentItem] = []
+    @Published private(set) var localDrafts: [LocalArticleDraft] = []
     @Published private(set) var todos: [TodoItem] = []
     @Published private(set) var isLoading = false
     @Published private(set) var isUpdatingTodos = false
@@ -316,6 +320,10 @@ final class WorkBentoViewModel: ObservableObject {
         todos.filter { !$0.isDone }.count
     }
 
+    var draftCount: Int {
+        localDrafts.count + remoteDrafts.count
+    }
+
     func load(client: ConfluenceClient?, user: UserProfile?, configuration: ServerConfiguration?) async {
         guard let client else { return }
         todoStorageKey = Self.todoKey(configuration: configuration, user: user)
@@ -324,7 +332,8 @@ final class WorkBentoViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
         async let draftsTask = loadDrafts(client: client)
-        drafts = await draftsTask
+        remoteDrafts = await draftsTask
+        localDrafts = LocalArticleDraftStore.load()
         todos = todoStorageKey.flatMap { LocalTodoStore.load(key: $0) } ?? []
         isLoading = false
     }
@@ -387,6 +396,33 @@ private enum LocalTodoStore {
     }
 }
 
+enum LocalArticleDraftStore {
+    private static let key = "local.article.drafts"
+
+    static func load() -> [LocalArticleDraft] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let drafts = try? JSONDecoder().decode([LocalArticleDraft].self, from: data) else {
+            return []
+        }
+        return drafts.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    static func save(_ draft: LocalArticleDraft) {
+        var drafts = load().filter { $0.contentID != draft.contentID }
+        drafts.insert(draft, at: 0)
+        persist(drafts)
+    }
+
+    static func remove(contentID: String) {
+        persist(load().filter { $0.contentID != contentID })
+    }
+
+    private static func persist(_ drafts: [LocalArticleDraft]) {
+        guard let data = try? JSONEncoder().encode(drafts) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+}
+
 struct WorkBentoHeader: View {
     @EnvironmentObject private var appSettings: AppSettings
     @EnvironmentObject private var sessionStore: SessionStore
@@ -403,7 +439,7 @@ struct WorkBentoHeader: View {
                     WorkBentoTile(
                         title: "草稿箱",
                         subtitle: "编辑中的页面",
-                        count: viewModel.drafts.count,
+                        count: viewModel.draftCount,
                         systemImage: "doc.text.fill",
                         iconColor: Color(hex: 0xDFFCF0),
                         gradient: [Color(hex: 0x20C997), Color(hex: 0x0B8F5A)]
@@ -440,7 +476,7 @@ struct WorkBentoHeader: View {
         }
         .sheet(isPresented: $showsDrafts) {
             NavigationStack {
-                DraftInboxView(items: viewModel.drafts)
+                DraftInboxView(localDrafts: viewModel.localDrafts, remoteDrafts: viewModel.remoteDrafts)
             }
         }
         .sheet(isPresented: $showsTodos) {
@@ -504,23 +540,47 @@ struct WorkBentoTile: View {
 }
 
 struct DraftInboxView: View {
-    let items: [ContentItem]
+    let localDrafts: [LocalArticleDraft]
+    let remoteDrafts: [ContentItem]
 
     var body: some View {
         List {
-            if items.isEmpty {
+            if localDrafts.isEmpty && remoteDrafts.isEmpty {
                 EmptyStateView(icon: "doc.text", title: "暂无草稿", message: "所有编辑中的页面会出现在这里")
                     .listRowBackground(AtlassianTheme.background)
                     .listRowSeparator(.hidden)
             } else {
-                ForEach(items) { item in
-                    NavigationLink {
-                        ContentDetailView(item: item)
-                            .id(item.id)
-                    } label: {
-                        ContentRow(item: item)
+                if !localDrafts.isEmpty {
+                    Section {
+                        ForEach(localDrafts) { draft in
+                            NavigationLink {
+                                LocalDraftEditorView(draft: draft)
+                            } label: {
+                                ContentRow(item: draft.item)
+                            }
+                            .listRowBackground(AtlassianTheme.background)
+                        }
+                    } header: {
+                        Text("本地未发布")
+                            .textCase(nil)
                     }
-                    .listRowBackground(AtlassianTheme.background)
+                }
+
+                if !remoteDrafts.isEmpty {
+                    Section {
+                        ForEach(remoteDrafts) { item in
+                            NavigationLink {
+                                ContentDetailView(item: item)
+                                    .id(item.id)
+                            } label: {
+                                ContentRow(item: item)
+                            }
+                            .listRowBackground(AtlassianTheme.background)
+                        }
+                    } header: {
+                        Text("Confluence 草稿")
+                            .textCase(nil)
+                    }
                 }
             }
         }
@@ -530,6 +590,72 @@ struct DraftInboxView: View {
         .navigationTitle("草稿箱")
         .inlineNavigationTitle()
         .liquidNavigationChrome()
+    }
+}
+
+struct LocalDraftEditorView: View {
+    @EnvironmentObject private var sessionStore: SessionStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var isSaving = false
+    @State private var message: String?
+
+    let draft: LocalArticleDraft
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let message {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(AtlassianTheme.mutedText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 10)
+            }
+            ContentEditorSheet(
+                title: draft.title,
+                storageHTML: draft.storageHTML,
+                isSaving: isSaving,
+                onCancel: { title, storageHTML in
+                    LocalArticleDraftStore.save(
+                        LocalArticleDraft(
+                            id: draft.id,
+                            contentID: draft.contentID,
+                            title: title,
+                            storageHTML: storageHTML,
+                            spaceName: draft.spaceName,
+                            type: draft.type,
+                            webPath: draft.webPath,
+                            updatedAt: Date()
+                        )
+                    )
+                    dismiss()
+                },
+                onSave: { title, storageHTML in
+                    Task { await publish(title: title, storageHTML: storageHTML) }
+                }
+            )
+        }
+    }
+
+    private func publish(title: String, storageHTML: String) async {
+        guard let client = sessionStore.client else { return }
+        isSaving = true
+        defer { isSaving = false }
+        do {
+            let detail = try await client.fetchDetail(id: draft.contentID, cachePolicy: .reloadIgnoringCache)
+            _ = try await client.updateContent(
+                id: detail.id,
+                type: detail.type,
+                title: title,
+                storageHTML: storageHTML,
+                versionNumber: detail.nextVersionNumber
+            )
+            LocalArticleDraftStore.remove(contentID: draft.contentID)
+            message = "草稿已发布"
+            dismiss()
+        } catch {
+            message = "发布失败：\(error.localizedDescription)"
+        }
     }
 }
 
@@ -618,17 +744,19 @@ final class SearchViewModel: ObservableObject {
     @Published private(set) var isLoadingMore = false
     @Published private(set) var hasMore = false
     @Published var errorMessage: String?
+    @Published private(set) var activeHighlight: String = ""
 
     private let pageSize = 30
     private var nextStart = 0
-    private var contentQuery = ""
-    private var authorQuery = ""
+    private var query = ""
+    private var cql: String?
 
-    func search(client: ConfluenceClient?, content: String, author: String) async {
+    func search(client: ConfluenceClient?, query: String) async {
         guard let client else { return }
-        contentQuery = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        authorQuery = author.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !contentQuery.isEmpty || !authorQuery.isEmpty else {
+        self.query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.cql = nil
+        activeHighlight = self.query
+        guard !self.query.isEmpty else {
             items = []
             hasMore = false
             return
@@ -639,10 +767,61 @@ final class SearchViewModel: ObservableObject {
         nextStart = 0
 
         do {
-            let page = try await client.searchContent(contentQuery: contentQuery, authorQuery: authorQuery, start: nextStart, limit: pageSize)
+            async let contentPageTask = client.searchContent(contentQuery: self.query, authorQuery: "", start: nextStart, limit: pageSize)
+            async let authorPageTask = client.searchContent(contentQuery: "", authorQuery: self.query, start: nextStart, limit: pageSize)
+            let merged = try await Self.merged(contentPageTask, authorPageTask)
+            let page = Array(merged.prefix(pageSize))
             items = page
             nextStart = page.count
             hasMore = page.count >= pageSize
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+
+        isLoading = false
+    }
+
+    func runPreset(_ preset: SearchPreset, client: ConfluenceClient?) async {
+        guard let client else { return }
+        isLoading = true
+        errorMessage = nil
+        nextStart = 0
+        hasMore = false
+        query = ""
+        cql = nil
+        activeHighlight = ""
+
+        do {
+            switch preset.kind {
+            case .mostReadThisWeek:
+                let weekStart = Calendar.current.dateInterval(of: .weekOfYear, for: Date())?.start ?? Date().addingTimeInterval(-7 * 24 * 60 * 60)
+                items = try await client.fetchPopular(start: 0, limit: 80, cachePolicy: .reloadIgnoringCache)
+                    .filter { ($0.date ?? Date.distantPast) >= weekStart }
+                    .prefix(10)
+                    .map { $0 }
+            case .mostCommentedThisWeek:
+                let weekStart = Calendar.current.dateInterval(of: .weekOfYear, for: Date())?.start ?? Date().addingTimeInterval(-7 * 24 * 60 * 60)
+                items = try await client.fetchPopular(start: 0, limit: 80, cachePolicy: .reloadIgnoringCache)
+                    .filter { ($0.date ?? Date.distantPast) >= weekStart }
+                    .sorted { ($0.commentCount ?? 0) > ($1.commentCount ?? 0) }
+                    .prefix(10)
+                    .map { $0 }
+            case .createdThisWeek:
+                let cql = "type in (page,blogpost) and created >= \"\(Self.weekStartString())\" order by created desc"
+                items = try await client.fetchCQLSearch(cql: cql, start: 0, limit: 30)
+                self.cql = cql
+                hasMore = items.count >= pageSize
+                nextStart = items.count
+            case .customCQL:
+                guard let customCQL = preset.cql?.trimmingCharacters(in: .whitespacesAndNewlines), !customCQL.isEmpty else {
+                    items = []
+                    break
+                }
+                items = try await client.fetchCQLSearch(cql: customCQL, start: 0, limit: 30)
+                cql = customCQL
+                hasMore = items.count >= pageSize
+                nextStart = items.count
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -665,7 +844,12 @@ final class SearchViewModel: ObservableObject {
         defer { isLoadingMore = false }
 
         do {
-            let page = try await client.searchContent(contentQuery: contentQuery, authorQuery: authorQuery, start: nextStart, limit: pageSize)
+            let page: [ContentItem]
+            if let cql {
+                page = try await client.fetchCQLSearch(cql: cql, start: nextStart, limit: pageSize)
+            } else {
+                page = try await client.searchContent(contentQuery: query, authorQuery: "", start: nextStart, limit: pageSize)
+            }
             let existingIDs = Set(items.map(\.id))
             let newItems = page.filter { !existingIDs.contains($0.id) }
             items.append(contentsOf: newItems)
@@ -675,14 +859,40 @@ final class SearchViewModel: ObservableObject {
             errorMessage = error.localizedDescription
         }
     }
+
+    private static func merged(_ first: [ContentItem], _ second: [ContentItem]) -> [ContentItem] {
+        var seen: Set<String> = []
+        var output: [ContentItem] = []
+        for item in first + second {
+            guard !seen.contains(item.id) else { continue }
+            seen.insert(item.id)
+            output.append(item)
+        }
+        return output.sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
+    }
+
+    private static func weekStartString() -> String {
+        let date = Calendar.current.dateInterval(of: .weekOfYear, for: Date())?.start ?? Date().addingTimeInterval(-7 * 24 * 60 * 60)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
 }
 
 struct SearchView: View {
     @EnvironmentObject private var sessionStore: SessionStore
     @EnvironmentObject private var appSettings: AppSettings
     @StateObject private var viewModel = SearchViewModel()
-    @State private var contentQuery = ""
-    @State private var authorQuery = ""
+    @State private var query = ""
+    @State private var customPresets = SearchPresetStore.load()
+    @State private var isShowingPresetEditor = false
+    @State private var presetName = ""
+    @State private var presetCQL = ""
+    let refreshToken: Int
+
+    init(refreshToken: Int = 0) {
+        self.refreshToken = refreshToken
+    }
 
     var body: some View {
         List {
@@ -698,12 +908,12 @@ struct SearchView: View {
                 EmptyStateView(icon: "exclamationmark.triangle", title: "搜索失败", message: errorMessage)
                     .listRowBackground(AtlassianTheme.background)
                     .listRowSeparator(.hidden)
-            } else if viewModel.items.isEmpty && (!contentQuery.isEmpty || !authorQuery.isEmpty) {
+            } else if viewModel.items.isEmpty && !query.isEmpty {
                 EmptyStateView(icon: "magnifyingglass", title: "暂无结果", message: "换个关键词试试")
                     .listRowBackground(AtlassianTheme.background)
                     .listRowSeparator(.hidden)
             } else if viewModel.items.isEmpty {
-                EmptyStateView(icon: "text.magnifyingglass", title: "查找 Confluence 内容", message: "左侧搜作者，右侧搜标题或正文")
+                EmptyStateView(icon: "text.magnifyingglass", title: "查找 Confluence 内容", message: "输入关键词或选择一个预设搜索")
                     .listRowBackground(AtlassianTheme.background)
                     .listRowSeparator(.hidden)
             } else {
@@ -713,7 +923,7 @@ struct SearchView: View {
                             ContentDetailView(item: item)
                                 .id(item.id)
                         } label: {
-                            ContentRow(item: item, highlightText: contentQuery, highlightAuthor: authorQuery)
+                            ContentRow(item: item, highlightText: viewModel.activeHighlight)
                         }
                         .listRowBackground(AtlassianTheme.background)
                         .onAppear {
@@ -746,43 +956,47 @@ struct SearchView: View {
         .navigationTitle("搜索")
         .inlineNavigationTitle()
         .liquidNavigationChrome()
+        .sheet(isPresented: $isShowingPresetEditor) {
+            NavigationStack {
+                Form {
+                    TextField("名称", text: $presetName)
+                    TextField("CQL，例如 type = page order by lastmodified desc", text: $presetCQL, axis: .vertical)
+                        .lineLimit(3...6)
+                }
+                .navigationTitle("添加预设")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("取消") { isShowingPresetEditor = false }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("保存") {
+                            let preset = SearchPreset(name: presetName, kind: .customCQL, cql: presetCQL)
+                            customPresets.append(preset)
+                            SearchPresetStore.save(customPresets)
+                            presetName = ""
+                            presetCQL = ""
+                            isShowingPresetEditor = false
+                        }
+                        .disabled(presetName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || presetCQL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+            }
+        }
+        .task(id: refreshToken) {
+            if refreshToken > 0 {
+                await viewModel.search(client: sessionStore.client, query: query)
+            }
+        }
     }
 
     private var searchFields: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .top, spacing: 12) {
-                authorField
-                contentField
-            }
-            VStack(spacing: 12) {
-                authorField
-                contentField
-            }
-        }
-        .padding(.vertical, 8)
-    }
-
-    private var authorField: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label("作者", systemImage: "person.crop.circle")
+        VStack(alignment: .leading, spacing: 14) {
+            Label("统一搜索", systemImage: "magnifyingglass")
                 .font(appSettings.subheadlineFont)
                 .foregroundStyle(AtlassianTheme.mutedText)
-            TextField("作者姓名或 username", text: $authorQuery)
-                .textFieldStyle(.plain)
-                .autocorrectionDisabled()
-                .submitLabel(.search)
-                .onSubmit { runSearch() }
-                .liquidField()
-        }
-    }
 
-    private var contentField: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label("内容", systemImage: "doc.text.magnifyingglass")
-                .font(appSettings.subheadlineFont)
-                .foregroundStyle(AtlassianTheme.mutedText)
             HStack(spacing: 8) {
-                TextField("标题或正文关键词", text: $contentQuery)
+                TextField("标题、正文、作者关键词", text: $query)
                     .textFieldStyle(.plain)
                     .autocorrectionDisabled()
                     .submitLabel(.search)
@@ -792,10 +1006,32 @@ struct SearchView: View {
                 } label: {
                     Image(systemName: "magnifyingglass")
                 }
-                .disabled(contentQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && authorQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .liquidField()
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(SearchPreset.builtIns + customPresets) { preset in
+                        Button {
+                            Task { await viewModel.runPreset(preset, client: sessionStore.client) }
+                        } label: {
+                            Label(preset.name, systemImage: preset.systemImage)
+                                .lineLimit(1)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+
+                    Button {
+                        isShowingPresetEditor = true
+                    } label: {
+                        Label("添加", systemImage: "plus")
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
         }
+        .padding(.vertical, 8)
     }
 
     private var loadingRow: some View {
@@ -808,8 +1044,54 @@ struct SearchView: View {
 
     private func runSearch() {
         Task {
-            await viewModel.search(client: sessionStore.client, content: contentQuery, author: authorQuery)
+            await viewModel.search(client: sessionStore.client, query: query)
         }
+    }
+}
+
+enum SearchPresetKind: String, Codable {
+    case mostReadThisWeek
+    case mostCommentedThisWeek
+    case createdThisWeek
+    case customCQL
+}
+
+struct SearchPreset: Identifiable, Codable, Equatable {
+    var id = UUID()
+    var name: String
+    var kind: SearchPresetKind
+    var cql: String?
+
+    var systemImage: String {
+        switch kind {
+        case .mostReadThisWeek: return "eye"
+        case .mostCommentedThisWeek: return "bubble.left.and.bubble.right"
+        case .createdThisWeek: return "sparkles"
+        case .customCQL: return "line.3.horizontal.decrease.circle"
+        }
+    }
+
+    static let builtIns = [
+        SearchPreset(name: "本周最多阅读 10 篇", kind: .mostReadThisWeek),
+        SearchPreset(name: "本周最多回复 10 篇", kind: .mostCommentedThisWeek),
+        SearchPreset(name: "本周新建", kind: .createdThisWeek)
+    ]
+}
+
+enum SearchPresetStore {
+    private static let key = "search.presets.custom"
+
+    static func load() -> [SearchPreset] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let presets = try? JSONDecoder().decode([SearchPreset].self, from: data) else {
+            return []
+        }
+        return presets
+    }
+
+    static func save(_ presets: [SearchPreset]) {
+        guard let data = try? JSONEncoder().encode(presets) else { return }
+        UserDefaults.standard.set(data, forKey: key)
     }
 }
 
@@ -990,6 +1272,11 @@ final class SpacesViewModel: ObservableObject {
 struct SpacesView: View {
     @EnvironmentObject private var sessionStore: SessionStore
     @StateObject private var viewModel = SpacesViewModel()
+    let refreshToken: Int
+
+    init(refreshToken: Int = 0) {
+        self.refreshToken = refreshToken
+    }
 
     var body: some View {
         List {
@@ -1051,7 +1338,7 @@ struct SpacesView: View {
             await viewModel.load(client: sessionStore.client, force: true)
         }
         .task {
-            await viewModel.load(client: sessionStore.client)
+            await viewModel.load(client: sessionStore.client, force: refreshToken > 0)
         }
     }
 }

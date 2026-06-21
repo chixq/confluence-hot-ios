@@ -169,7 +169,10 @@ struct ContentDetailView: View {
                     title: detail.title,
                     storageHTML: detail.storageHTML ?? "",
                     isSaving: isPerformingOperation,
-                    onCancel: { isShowingEditor = false },
+                    onCancel: { title, storageHTML in
+                        saveLocalDraft(title: title, storageHTML: storageHTML)
+                        isShowingEditor = false
+                    },
                     onSave: { title, storageHTML in
                         Task { await updateArticle(title: title, storageHTML: storageHTML) }
                     }
@@ -282,11 +285,30 @@ struct ContentDetailView: View {
             self.detail = updated
             renderedHTML = await client.inlineAuthenticatedImages(in: updated.renderedHTML, baseURL: sessionStore.configuration?.baseURL)
             operationMessage = "文章已更新"
+            LocalArticleDraftStore.remove(contentID: detail.id)
             isShowingEditor = false
         } catch {
             operationMessage = "更新失败：\(error.localizedDescription)"
         }
         isPerformingOperation = false
+    }
+
+    private func saveLocalDraft(title: String, storageHTML: String) {
+        guard let detail,
+              title != detail.title || storageHTML != (detail.storageHTML ?? "") else { return }
+        LocalArticleDraftStore.save(
+            LocalArticleDraft(
+                id: detail.id,
+                contentID: detail.id,
+                title: title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? detail.title : title,
+                storageHTML: storageHTML,
+                spaceName: detail.space?.name ?? item.spaceName,
+                type: detail.type,
+                webPath: detail.links?.webUI ?? item.webPath,
+                updatedAt: Date()
+            )
+        )
+        operationMessage = "已保存到本地草稿箱"
     }
 
     private func deleteArticle() async {
@@ -709,10 +731,10 @@ struct ContentEditorSheet: View {
     @State private var storageHTML: String
 
     let isSaving: Bool
-    let onCancel: () -> Void
+    let onCancel: (String, String) -> Void
     let onSave: (String, String) -> Void
 
-    init(title: String, storageHTML: String, isSaving: Bool, onCancel: @escaping () -> Void, onSave: @escaping (String, String) -> Void) {
+    init(title: String, storageHTML: String, isSaving: Bool, onCancel: @escaping (String, String) -> Void, onSave: @escaping (String, String) -> Void) {
         _title = State(initialValue: title)
         _storageHTML = State(initialValue: storageHTML)
         self.isSaving = isSaving
@@ -746,7 +768,7 @@ struct ContentEditorSheet: View {
             .inlineNavigationTitle()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { onCancel() }
+                    Button("取消") { onCancel(title.trimmingCharacters(in: .whitespacesAndNewlines), storageHTML) }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button {

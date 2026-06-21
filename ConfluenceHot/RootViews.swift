@@ -1,4 +1,7 @@
 import SwiftUI
+#if os(iOS)
+import UIKit
+#endif
 
 struct RootView: View {
     @EnvironmentObject private var sessionStore: SessionStore
@@ -122,41 +125,119 @@ struct LoginView: View {
     }
 }
 
+private enum MainTab: Hashable {
+    case work
+    case spaces
+    case popular
+    case search
+    case settings
+}
+
 struct MainTabView: View {
+    @State private var selectedTab: MainTab = .work
+    @State private var refreshTokens: [MainTab: Int] = [:]
+
     var body: some View {
-        TabView {
-            AdaptiveFeedView(kind: .recent)
+        TabView(selection: $selectedTab) {
+            AdaptiveFeedView(kind: .recent, refreshToken: refreshTokens[.work, default: 0])
+                .id(refreshTokens[.work, default: 0])
             .tabItem {
                 Label("工作", systemImage: "rectangle.stack")
             }
+            .tag(MainTab.work)
 
             NavigationStack {
-                SpacesView()
+                SpacesView(refreshToken: refreshTokens[.spaces, default: 0])
             }
+            .id(refreshTokens[.spaces, default: 0])
             .tabItem {
                 Label("空间", systemImage: "folder")
             }
+            .tag(MainTab.spaces)
 
-            AdaptiveFeedView(kind: .popular)
+            AdaptiveFeedView(kind: .popular, refreshToken: refreshTokens[.popular, default: 0])
+                .id(refreshTokens[.popular, default: 0])
             .tabItem {
                 Label("热门", systemImage: "flame.fill")
             }
+            .tag(MainTab.popular)
 
             NavigationStack {
-                SearchView()
+                SearchView(refreshToken: refreshTokens[.search, default: 0])
             }
+            .id(refreshTokens[.search, default: 0])
             .tabItem {
                 Label("搜索", systemImage: "magnifyingglass")
             }
+            .tag(MainTab.search)
 
             NavigationStack {
                 SettingsView()
             }
+            .id(refreshTokens[.settings, default: 0])
             .tabItem {
                 Label("设置", systemImage: "gearshape")
             }
+            .tag(MainTab.settings)
         }
         .tint(AtlassianTheme.blue)
         .liquidTabBarChrome()
+        #if os(iOS)
+        .background(
+            TabBarTapObserver { index in
+                if let tab = MainTab(index: index) {
+                    refreshTokens[tab, default: 0] += 1
+                }
+            }
+        )
+        #endif
     }
 }
+
+private extension MainTab {
+    init?(index: Int) {
+        switch index {
+        case 0: self = .work
+        case 1: self = .spaces
+        case 2: self = .popular
+        case 3: self = .search
+        case 4: self = .settings
+        default: return nil
+        }
+    }
+}
+
+#if os(iOS)
+private struct TabBarTapObserver: UIViewControllerRepresentable {
+    let onTap: (Int) -> Void
+
+    func makeUIViewController(context: Context) -> UIViewController {
+        UIViewController()
+    }
+
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
+        DispatchQueue.main.async {
+            if let tabBarController = uiViewController.tabBarController,
+               tabBarController.delegate !== context.coordinator {
+                tabBarController.delegate = context.coordinator
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onTap: onTap)
+    }
+
+    final class Coordinator: NSObject, UITabBarControllerDelegate {
+        let onTap: (Int) -> Void
+
+        init(onTap: @escaping (Int) -> Void) {
+            self.onTap = onTap
+        }
+
+        func tabBarController(_ tabBarController: UITabBarController, didSelect viewController: UIViewController) {
+            onTap(tabBarController.selectedIndex)
+        }
+    }
+}
+#endif

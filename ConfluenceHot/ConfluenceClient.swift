@@ -181,6 +181,10 @@ final class ConfluenceClient {
         try await searchContent(contentQuery: query, authorQuery: "", start: 0, limit: limit, cachePolicy: cachePolicy)
     }
 
+    func fetchCQLSearch(cql: String, start: Int = 0, limit: Int = 30) async throws -> [ContentItem] {
+        try await fetchSearchItems(cql: cql, start: start, limit: limit)
+    }
+
     func searchContent(contentQuery: String, authorQuery: String, start: Int = 0, limit: Int = 30, cachePolicy: ConfluenceCachePolicy = .useCache) async throws -> [ContentItem] {
         let cleaned = contentQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedAuthor = authorQuery.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -431,6 +431,36 @@ struct TodoItem: Identifiable, Codable, Equatable {
     var isDone: Bool
 }
 
+struct LocalArticleDraft: Identifiable, Codable, Equatable {
+    var id: String
+    var contentID: String
+    var title: String
+    var storageHTML: String
+    var spaceName: String?
+    var type: String
+    var webPath: String?
+    var updatedAt: Date
+
+    var item: ContentItem {
+        ContentItem(
+            id: contentID,
+            title: title,
+            type: type,
+            spaceName: spaceName,
+            authorName: "本地草稿",
+            authorAvatarPath: nil,
+            dateText: DateParser.displayText(from: nil, date: updatedAt),
+            date: updatedAt,
+            webPath: webPath,
+            likeCount: nil,
+            commentCount: nil,
+            excerpt: storageHTML.strippedHTMLText().limited(to: 160),
+            searchableText: storageHTML.strippedHTMLText(),
+            origin: .recent
+        )
+    }
+}
+
 struct GenericCountResponse: Decodable {
     let size: Int?
     let totalSize: Int?

@@ -103,7 +103,7 @@ struct SettingsView: View {
                                     .foregroundStyle(AtlassianTheme.mutedText)
                             }
                             .font(appSettings.subheadlineFont)
-                            Slider(value: $appSettings.fontScale, in: 0.85...1.25, step: 0.05)
+                            Slider(value: $appSettings.fontScale, in: 0.5...1.25, step: 0.05)
                         }
 
                         Toggle(isOn: $appSettings.landscapeSplitEnabled) {
