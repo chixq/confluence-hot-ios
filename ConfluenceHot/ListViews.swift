@@ -475,7 +475,7 @@ struct WorkBentoHeader: View {
                 }
             }
         } message: {
-            Text("待办数据会保存在当前用户个人空间下的「\(ConfluenceClient.todoPageTitle)」页面，并设置为仅当前用户可见。")
+            Text("待办数据会保存在当前用户个人空间下的「\(ConfluenceClient.todoPageTitle)」页面。应用会尝试添加仅当前用户可见限制；如果服务器不支持限制接口，则沿用个人空间权限。")
         }
     }
 }
@@ -796,7 +796,7 @@ struct SearchView: View {
             Label("作者", systemImage: "person.crop.circle")
                 .font(appSettings.subheadlineFont)
                 .foregroundStyle(AtlassianTheme.mutedText)
-            TextField("作者 username", text: $authorQuery)
+            TextField("作者姓名或 username", text: $authorQuery)
                 .textFieldStyle(.plain)
                 .autocorrectionDisabled()
                 .submitLabel(.search)
@@ -1111,6 +1111,7 @@ struct SpaceRow: View {
 @MainActor
 final class SpaceContentViewModel: ObservableObject {
     let space: ConfluenceSpace
+    let parent: ContentItem?
 
     @Published private(set) var items: [ContentItem] = []
     @Published private(set) var isLoading = false
@@ -1121,8 +1122,21 @@ final class SpaceContentViewModel: ObservableObject {
     private let pageSize = 30
     private var nextStart = 0
 
-    init(space: ConfluenceSpace) {
+    init(space: ConfluenceSpace, parent: ContentItem? = nil) {
         self.space = space
+        self.parent = parent
+    }
+
+    var title: String {
+        parent?.title ?? space.name
+    }
+
+    var emptyTitle: String {
+        parent == nil ? "暂无目录" : "暂无下级页面"
+    }
+
+    var emptyMessage: String {
+        parent == nil ? "这个空间里还没有可见的根页面" : "这个页面下还没有可见的子页面"
     }
 
     func load(client: ConfluenceClient?, force: Bool = false) async {
@@ -1134,7 +1148,7 @@ final class SpaceContentViewModel: ObservableObject {
         hasMore = true
 
         do {
-            let page = try await client.fetchSpaceContent(spaceKey: space.key, start: nextStart, limit: pageSize, cachePolicy: force ? .reloadIgnoringCache : .useCache)
+            let page = try await fetchPage(client: client, start: nextStart)
             items = page
             nextStart = page.count
             hasMore = page.count >= pageSize
@@ -1160,7 +1174,7 @@ final class SpaceContentViewModel: ObservableObject {
         defer { isLoadingMore = false }
 
         do {
-            let page = try await client.fetchSpaceContent(spaceKey: space.key, start: nextStart, limit: pageSize)
+            let page = try await fetchPage(client: client, start: nextStart)
             let existingIDs = Set(items.map(\.id))
             let newItems = page.filter { !existingIDs.contains($0.id) }
             items.append(contentsOf: newItems)
@@ -1170,18 +1184,47 @@ final class SpaceContentViewModel: ObservableObject {
             errorMessage = error.localizedDescription
         }
     }
+
+    private func fetchPage(client: ConfluenceClient, start: Int) async throws -> [ContentItem] {
+        if let parent {
+            return try await client.fetchChildPages(parentID: parent.id, start: start, limit: pageSize)
+        }
+        return try await client.fetchSpaceRootPages(spaceKey: space.key, start: start, limit: pageSize)
+    }
 }
 
 struct SpaceContentView: View {
     @EnvironmentObject private var sessionStore: SessionStore
     @StateObject private var viewModel: SpaceContentViewModel
 
-    init(space: ConfluenceSpace) {
-        _viewModel = StateObject(wrappedValue: SpaceContentViewModel(space: space))
+    init(space: ConfluenceSpace, parent: ContentItem? = nil) {
+        _viewModel = StateObject(wrappedValue: SpaceContentViewModel(space: space, parent: parent))
     }
 
     var body: some View {
         List {
+            if let parent = viewModel.parent {
+                NavigationLink {
+                    ContentDetailView(item: parent)
+                        .id(parent.id)
+                } label: {
+                    HStack(spacing: 14) {
+                        IconBadge(systemName: "doc.text", tint: AtlassianTheme.blue)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("查看页面正文")
+                                .font(.headline)
+                                .foregroundStyle(AtlassianTheme.text)
+                            Text(parent.title)
+                                .font(.subheadline)
+                                .foregroundStyle(AtlassianTheme.mutedText)
+                                .lineLimit(1)
+                        }
+                    }
+                    .padding(.vertical, 8)
+                }
+                .listRowBackground(AtlassianTheme.background)
+            }
+
             if viewModel.isLoading && viewModel.items.isEmpty {
                 ProgressView()
                     .tint(AtlassianTheme.blue)
@@ -1193,33 +1236,30 @@ struct SpaceContentView: View {
                     .listRowBackground(AtlassianTheme.background)
                     .listRowSeparator(.hidden)
             } else if viewModel.items.isEmpty {
-                EmptyStateView(icon: "doc", title: "暂无内容", message: "这个空间里还没有可见页面或博客")
+                EmptyStateView(icon: "folder", title: viewModel.emptyTitle, message: viewModel.emptyMessage)
                     .listRowBackground(AtlassianTheme.background)
                     .listRowSeparator(.hidden)
             } else {
-                ForEach(ContentGrouper.group(items: viewModel.items)) { section in
-                    Section {
-                        ForEach(section.items) { item in
-                            NavigationLink {
-                                ContentDetailView(item: item)
-                                    .id(item.id)
-                            } label: {
-                                ContentRow(item: item)
-                            }
-                            .listRowBackground(AtlassianTheme.background)
-                            .onAppear {
-                                Task {
-                                    await viewModel.loadMoreIfNeeded(currentItem: item, client: sessionStore.client)
-                                }
+                Section {
+                    ForEach(viewModel.items) { item in
+                        NavigationLink {
+                            SpaceContentView(space: viewModel.space, parent: item)
+                        } label: {
+                            SpacePageRow(item: item)
+                        }
+                        .listRowBackground(AtlassianTheme.background)
+                        .onAppear {
+                            Task {
+                                await viewModel.loadMoreIfNeeded(currentItem: item, client: sessionStore.client)
                             }
                         }
-                    } header: {
-                        Text(section.title)
-                            .font(.system(size: 21, weight: .semibold))
-                            .textCase(nil)
-                            .foregroundStyle(AtlassianTheme.mutedText)
-                            .padding(.top, 16)
                     }
+                } header: {
+                    Text(viewModel.parent == nil ? "页面目录" : "下级页面")
+                        .font(.system(size: 21, weight: .semibold))
+                        .textCase(nil)
+                        .foregroundStyle(AtlassianTheme.mutedText)
+                        .padding(.top, 16)
                 }
 
                 if viewModel.isLoadingMore {
@@ -1236,7 +1276,7 @@ struct SpaceContentView: View {
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .background(AtlassianTheme.background)
-        .navigationTitle(viewModel.space.name)
+        .navigationTitle(viewModel.title)
         .inlineNavigationTitle()
         .liquidNavigationChrome()
         .refreshable {
@@ -1245,5 +1285,51 @@ struct SpaceContentView: View {
         .task {
             await viewModel.load(client: sessionStore.client)
         }
+    }
+}
+
+struct SpacePageRow: View {
+    @EnvironmentObject private var appSettings: AppSettings
+
+    let item: ContentItem
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            IconBadge(systemName: "doc.text", tint: AtlassianTheme.blue)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(item.title)
+                    .font(appSettings.fontChoice == .system ? .system(size: 18, weight: .semibold) : appSettings.fontChoice.font(size: 18 * appSettings.fontScale, relativeTo: .headline))
+                    .foregroundStyle(AtlassianTheme.text)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+
+                Text(subtitle)
+                    .font(appSettings.subheadlineFont)
+                    .foregroundStyle(AtlassianTheme.mutedText)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
+
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(AtlassianTheme.mutedText.opacity(0.65))
+                .padding(.top, 7)
+        }
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
+    }
+
+    private var subtitle: String {
+        var pieces: [String] = []
+        if let authorName = item.authorName, !authorName.isEmpty {
+            pieces.append(authorName)
+        }
+        if let dateText = item.dateText, !dateText.isEmpty {
+            pieces.append(dateText)
+        }
+        pieces.append("点击进入下级目录")
+        return pieces.joined(separator: " | ")
     }
 }

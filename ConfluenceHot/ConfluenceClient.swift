@@ -115,13 +115,17 @@ final class ConfluenceClient {
     }
 
     func createTodoPage(for user: UserProfile) async throws -> TodoPage {
+        if let existing = try await fetchTodoPage(for: user) {
+            return existing
+        }
+
         let spaceKey = try await personalSpaceKey(for: user)
         let detail = try await createPage(
             title: Self.todoPageTitle,
             spaceKey: spaceKey,
             storageHTML: TodoPage.storageHTML(for: [])
         )
-        try await applyPrivateRestrictions(contentID: detail.id, user: user)
+        try? await applyPrivateRestrictions(contentID: detail.id, user: user)
         return TodoPage(detail: detail)
     }
 
@@ -190,6 +194,31 @@ final class ConfluenceClient {
             }
             throw error
         }
+    }
+
+    func fetchSpaceRootPages(spaceKey: String, start: Int = 0, limit: Int = 30) async throws -> [ContentItem] {
+        let response: ContentSearchResponse = try await request(
+            "/rest/api/space/\(spaceKey)/content/page",
+            queryItems: [
+                URLQueryItem(name: "depth", value: "root"),
+                URLQueryItem(name: "start", value: String(start)),
+                URLQueryItem(name: "limit", value: String(limit)),
+                URLQueryItem(name: "expand", value: "space,history.createdBy,history.lastUpdated")
+            ]
+        )
+        return response.results.map { $0.item(origin: .search, prefersCreatedAuthor: true) }
+    }
+
+    func fetchChildPages(parentID: String, start: Int = 0, limit: Int = 30) async throws -> [ContentItem] {
+        let response: ContentSearchResponse = try await request(
+            "/rest/api/content/\(parentID)/child/page",
+            queryItems: [
+                URLQueryItem(name: "start", value: String(start)),
+                URLQueryItem(name: "limit", value: String(limit)),
+                URLQueryItem(name: "expand", value: "space,history.createdBy,history.lastUpdated")
+            ]
+        )
+        return response.results.map { $0.item(origin: .search, prefersCreatedAuthor: true) }
     }
 
     func search(_ query: String, limit: Int = 30, cachePolicy: ConfluenceCachePolicy = .useCache) async throws -> [ContentItem] {
@@ -542,7 +571,7 @@ final class ConfluenceClient {
         }
     }
 
-    private func fetchSearchItems(cql: String, start: Int, limit: Int) async throws -> [ContentItem] {
+    private func fetchSearchItems(cql: String, start: Int, limit: Int, prefersCreatedAuthor: Bool = false) async throws -> [ContentItem] {
         let response: ContentSearchResponse = try await request(
             "/rest/api/content/search",
             queryItems: [
@@ -552,10 +581,26 @@ final class ConfluenceClient {
                 URLQueryItem(name: "expand", value: "space,history.createdBy,history.lastUpdated,body.view")
             ]
         )
-        return response.results.map { $0.item(origin: .search) }
+        return response.results.map { $0.item(origin: .search, prefersCreatedAuthor: prefersCreatedAuthor) }
     }
 
     private func searchContentWithAuthorFilter(contentQuery: String, authorQuery: String, start: Int, limit: Int) async throws -> [ContentItem] {
+        let authorClauses = try await creatorCQLClauses(for: authorQuery)
+        if !authorClauses.isEmpty {
+            var filters = ["type in (page,blogpost)", "(\(authorClauses.joined(separator: " or ")))"]
+            if !contentQuery.isEmpty {
+                let escaped = Self.escapeCQL(contentQuery)
+                filters.append("(title ~ \"\(escaped)\" or text ~ \"\(escaped)\")")
+            }
+            let cql = "\(filters.joined(separator: " and ")) order by lastmodified desc"
+            do {
+                return try await fetchSearchItems(cql: cql, start: start, limit: limit, prefersCreatedAuthor: true)
+                    .filter { Self.matchesAuthor($0, query: authorQuery) && Self.matchesContent($0, query: contentQuery) }
+            } catch {
+                // Fall back to client-side filtering for older Confluence CQL variants.
+            }
+        }
+
         var filters = ["type in (page,blogpost)"]
         if !contentQuery.isEmpty {
             let escaped = Self.escapeCQL(contentQuery)
@@ -567,10 +612,10 @@ final class ConfluenceClient {
         var skippedMatches = 0
         var output: [ContentItem] = []
         let rawPageSize = 80
-        let maxScanned = 800
+        let maxScanned = contentQuery.isEmpty ? 4000 : 1200
 
         while output.count < limit && rawStart < maxScanned {
-            let page = try await fetchSearchItems(cql: cql, start: rawStart, limit: rawPageSize)
+            let page = try await fetchSearchItems(cql: cql, start: rawStart, limit: rawPageSize, prefersCreatedAuthor: true)
             if page.isEmpty { break }
             for item in page {
                 guard Self.matchesAuthor(item, query: authorQuery),
@@ -587,6 +632,35 @@ final class ConfluenceClient {
         }
 
         return output
+    }
+
+    private func creatorCQLClauses(for authorQuery: String) async throws -> [String] {
+        let cleaned = authorQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return [] }
+
+        var creators: [String] = [cleaned]
+        do {
+            let response: SearchUserResponse = try await request(
+                "/rest/api/search/user",
+                queryItems: [
+                    URLQueryItem(name: "cql", value: "user.fullname ~ \"\(Self.escapeCQL(cleaned))\""),
+                    URLQueryItem(name: "limit", value: "20")
+                ]
+            )
+            for result in response.results {
+                if let username = result.username ?? result.user?.username {
+                    creators.append(username)
+                }
+                if let userKey = result.user?.userKey {
+                    creators.append(userKey)
+                }
+            }
+        } catch {
+            // The raw query is still useful when the user types an exact username.
+        }
+
+        let uniqueCreators = Array(Set(creators.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) })).filter { !$0.isEmpty }
+        return uniqueCreators.prefix(20).map { "creator = \"\(Self.escapeCQL($0))\"" }
     }
 
     private func personalSpaceKey(for user: UserProfile) async throws -> String {
@@ -612,15 +686,41 @@ final class ConfluenceClient {
     }
 
     private func applyPrivateRestrictions(contentID: String, user: UserProfile) async throws {
-        let subject = RestrictionUser(
-            type: user.type ?? "known",
-            username: user.username ?? configuration.username,
-            userKey: user.userKey,
-            displayName: user.displayName
-        )
-        let body = RestrictionUpdateRequest(restrictions: OperationRestrictions(user: [subject], group: []))
-        try await requestVoid("/rest/api/content/\(contentID)/restriction/byOperation/read", method: "PUT", body: body)
-        try await requestVoid("/rest/api/content/\(contentID)/restriction/byOperation/update", method: "PUT", body: body)
+        var lastError: Error?
+        for operation in ["read", "update"] {
+            do {
+                try await addUserRestriction(contentID: contentID, operation: operation, user: user)
+            } catch {
+                lastError = error
+            }
+        }
+        if let lastError {
+            throw lastError
+        }
+    }
+
+    private func addUserRestriction(contentID: String, operation: String, user: UserProfile) async throws {
+        let username = user.username ?? configuration.username
+        do {
+            try await requestVoid(
+                "/rest/api/content/\(contentID)/restriction/byOperation/\(operation)/user",
+                method: "POST",
+                queryItems: [URLQueryItem(name: "username", value: username)],
+                body: EmptyBody()
+            )
+            return
+        } catch {
+            if let userKey = user.userKey, !userKey.isEmpty {
+                try await requestVoid(
+                    "/rest/api/content/\(contentID)/restriction/byOperation/\(operation)/user",
+                    method: "POST",
+                    queryItems: [URLQueryItem(name: "key", value: userKey)],
+                    body: EmptyBody()
+                )
+                return
+            }
+            throw error
+        }
     }
 
     private func fetchUserCount() async -> Int? {

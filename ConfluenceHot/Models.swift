@@ -171,9 +171,10 @@ struct ContentSearchResult: Decodable {
         case links = "_links"
     }
 
-    func item(origin: ContentItem.Origin) -> ContentItem {
+    func item(origin: ContentItem.Origin, prefersCreatedAuthor: Bool = false) -> ContentItem {
         let update = history?.lastUpdated
         let created = history?.createdBy
+        let author = prefersCreatedAuthor ? created : (update?.by ?? created)
         let dateString = update?.friendlyWhen ?? update?.when ?? history?.createdDate
         let parsedDate = DateParser.parse(update?.when ?? history?.createdDate)
         let fullText = body?.view?.value.strippedHTMLText()
@@ -183,8 +184,8 @@ struct ContentSearchResult: Decodable {
             title: title,
             type: type,
             spaceName: space?.name,
-            authorName: update?.by?.displayName ?? created?.displayName,
-            authorAvatarPath: update?.by?.profilePicture?.path ?? created?.profilePicture?.path,
+            authorName: author?.displayName,
+            authorAvatarPath: author?.profilePicture?.path,
             dateText: DateParser.displayText(from: dateString, date: parsedDate),
             date: parsedDate,
             webPath: links?.webUI ?? links?.tinyUI,
